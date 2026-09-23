@@ -1,0 +1,14 @@
+# ============================================================
+# METAPOLLO — RAW KITTY ALPHA AUDIT
+#
+# No CRT passes. No state engine. No reflection.
+#
+# This checks the alpha value Kitty gives to the custom-shader
+# stage BEFORE any Metapollo shader touches the frame.
+# ============================================================
+
+startgroup
+    animation_step 0
+    var float AUDIT_STRIP_START = 0.88
+    shaders metapollo-alpha-audit
+endgroup

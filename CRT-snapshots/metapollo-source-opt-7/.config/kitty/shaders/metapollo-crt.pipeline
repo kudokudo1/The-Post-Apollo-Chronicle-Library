@@ -1,0 +1,491 @@
+# ============================================================
+# METAPOLLO CRT
+#
+# ALPHA-ONLY PERSISTENT STATE ENGINE — CONFIRMED BUILD
+# SCHEDULER CLEANUP — CENTRALIZED CONTINUOUS REDRAW
+#
+# Old signal files are NOT used:
+#
+#   metapollo-tear
+#   metapollo-nosignal
+#   metapollo-wake
+#   metapollo-wake-test
+#   metapollo-idle-marker
+#   metapollo-idle-wake-state
+#   metapollo-wake-state
+#   metapollo-state-copy
+#
+# They can stay on disk.
+#
+# Signal path now:
+#
+#   Kitty event
+#      ↓
+#   tiny center scratch A (next alpha-state)
+#      ↓ attached same-draw copy
+#   persist alpha channel
+#      ↓
+#   old visual renderer
+#
+# ============================================================
+
+
+textures a persist
+
+
+# ============================================================
+# 01 — CRT + GLASS  [PASS MERGE 3]
+#
+# Test merge:
+#   crt -> metapollo-glass
+#
+# No visual values changed.
+# ============================================================
+
+startgroup
+
+    # Static geometry/glass pass. The continuous 16 ms redraw clock
+    # still comes from the HUM + SIGNAL group later in the pipeline.
+    animation_step 0
+
+    # --------------------------------------------------------
+    # CRT — unchanged
+    # --------------------------------------------------------
+
+    var float WARP = 0.08
+    var float SCAN = 2.0
+
+    var float4 TINT = float4(1.0, 1.0, 1.0, 0.0)
+
+    # --------------------------------------------------------
+    # GLASS — unchanged
+    # --------------------------------------------------------
+
+    var float VIGNETTE_STRENGTH = 0.13
+    var float VIGNETTE_POWER = 0.3
+    var float CENTER_LIFT = 0.9
+
+    shaders crt metapollo-glass
+
+endgroup
+
+
+# ============================================================
+# 02 — CHROMA
+# ============================================================
+
+startgroup
+
+    animation_step 0
+
+    var float CHROMA_SHIFT_PIXELS = 1.3
+    var float CHROMA_STRENGTH = 0.3
+
+    var float CHROMA_START = 0.08
+    var float CHROMA_FULL = 0.55
+
+    shaders metapollo-chroma
+
+endgroup
+
+
+# ============================================================
+# 03 — BLOOM
+# ============================================================
+
+startgroup
+
+    animation_step 0
+
+    var float BLOOM_THRESHOLD = 0.42
+    var float BLOOM_STRENGTH = 0.60
+    var float BLOOM_RADIUS = 2.2
+
+    var float COLOR_BLOOM_BOOST = 0.32
+
+    shaders metapollo-bloom
+
+endgroup
+
+
+# ============================================================
+# 04 — HALATION
+# ============================================================
+
+startgroup
+
+    animation_step 0
+
+    var float HALATION_THRESHOLD = 0.34
+    var float HALATION_SOFTNESS = 0.22
+
+    var float COLOR_START = 0.06
+    var float COLOR_FULL = 0.30
+
+    var float HOT_CORE_BOOST = 0.14
+
+    var float INNER_RADIUS_PX = 1.6
+    var float OUTER_RADIUS_PX = 4.5
+
+    var float INNER_STRENGTH = 0.20
+    var float OUTER_STRENGTH = 0.10
+
+    var float RESIDUAL_STRENGTH = 0.045
+
+    shaders metapollo-halation
+
+endgroup
+
+
+# ============================================================
+# 05 — PHOSPHOR + GRID  [TRUE SOURCE FUSION]
+#
+# Test merge:
+#   metapollo-phosphor -> metapollo-grid
+#
+# No visual values changed. If both shaders are pure color/mask
+# transforms, this preserves the old two-pass order while removing
+# one full-screen group. Your GOLDEN backup is the rollback point.
+# ============================================================
+
+startgroup
+
+    animation_step 0
+
+    # --------------------------------------------------------
+    # PHOSPHOR — unchanged
+    # --------------------------------------------------------
+
+    var float PHOSPHOR_STRENGTH = 0.50
+    var float PHOSPHOR_STRIPE_WIDTH = 1.0
+
+    var float PHOSPHOR_ROW_HEIGHT = 3.0
+    var float PHOSPHOR_ROW_OFFSET = 1.5
+
+    var float PHOSPHOR_BRIDGE_DARKEN = 0.28
+
+    var float PHOSPHOR_START = 0.03
+    var float PHOSPHOR_FULL = 0.40
+
+    # --------------------------------------------------------
+    # GRID — unchanged
+    # --------------------------------------------------------
+
+    var float VERTICAL_SPACING = 4.0
+    var float VERTICAL_WIDTH = 1.0
+    var float VERTICAL_DARKEN = 0.5
+
+    var float HORIZONTAL_SPACING = 3.0
+    var float HORIZONTAL_WIDTH = 1.0
+    var float HORIZONTAL_DARKEN = 0.1
+
+    var float GRID_START = 0.025
+    var float GRID_FULL = 0.35
+
+    shaders metapollo-phosphor-grid
+
+endgroup
+
+
+# ============================================================
+# 06 — RANDOM INTERFERENCE
+# ============================================================
+
+startgroup
+
+    # No independent timer: this still runs on every render caused by
+    # the continuous HUM + SIGNAL group below.
+    animation_step 0
+
+    var float EVENT_WINDOW = 6.0
+    var float EVENT_CHANCE = 0.38
+
+    var float TWO_REGION_CHANCE = 0.20
+    var float THREE_REGION_CHANCE = 0.05
+
+    var float CATASTROPHIC_THREE_CHANCE = 0.20
+
+    var float SHORT_DURATION_MIN = 0.08
+    var float SHORT_DURATION_MAX = 0.35
+
+    var float MEDIUM_DURATION_MIN = 0.40
+    var float MEDIUM_DURATION_MAX = 1.10
+
+    var float LONG_DURATION_MIN = 1.20
+    var float LONG_DURATION_MAX = 3.00
+
+    var float MEDIUM_DURATION_CHANCE = 0.22
+    var float LONG_DURATION_CHANCE = 0.06
+
+    var float MIN_BAND_HEIGHT = 0.025
+    var float MAX_BAND_HEIGHT = 0.10
+
+    var float TEAR_PIXELS = 12.0
+
+    var float STATIC_STRENGTH = 0.60
+    var float LINE_STRENGTH = 0.32
+
+    shaders metapollo-interference
+
+endgroup
+
+
+# ============================================================
+# 07 — SYNC
+# ============================================================
+
+startgroup
+
+    # No independent timer: Group 14 already redraws the pipeline
+    # every 16 ms, so the sync effect still updates continuously.
+    animation_step 0
+
+    var float EVENT_WINDOW = 14.0
+    var float EVENT_CHANCE = 0.16
+
+    var float MIN_DURATION = 0.10
+    var float MAX_DURATION = 0.22
+
+    var float SHIFT_PIXELS = 14.0
+    var float WOBBLE_PIXELS = 1.6
+
+    var float LINE_SOFTNESS = 0.012
+    var float LINE_STRENGTH = 0.18
+
+    var float BRIGHTNESS_PULSE = 0.05
+
+    shaders metapollo-sync
+
+endgroup
+
+# ============================================================
+# 08 — KITTY IDLE -> NEXT STATE IN A
+#
+# This is the proven-safe pattern:
+#   read previous persist while output target is A
+#   then attached pass copies A -> persist in the same draw.
+# ============================================================
+
+startgroup
+
+    animation_start user-idle
+    animation_stop 1100
+    animation_curve linear
+    animation_step 16
+
+    output_texture a
+
+    var int EVENT_KIND = 1
+    var float TRANSITION_STEP = 0.018
+
+    shaders metapollo-signal-event-state
+
+endgroup
+
+
+# ============================================================
+# 09 — IDLE STATE COMMIT: A -> PERSIST
+# ============================================================
+
+startgroup
+
+    attach
+    animation_step 16
+
+    output_texture persist
+
+    shaders metapollo-signal-copy-a
+
+endgroup
+
+
+# ============================================================
+# 10 — KITTY ACTIVITY/FOCUS -> NEXT STATE IN A
+#
+# This group is deliberately AFTER the idle writer. If an idle and
+# activity event ever collide in one draw, activity wins.
+#
+# Repeated mouse/key events may restart Kitty's animation timer, but
+# they do NOT reset our wake progress because progress lives in persist.
+# ============================================================
+
+startgroup
+
+    animation_start os-window-focus-in | user-activity
+    animation_stop 1100
+    animation_curve linear
+    animation_step 16
+
+    output_texture a
+
+    var int EVENT_KIND = 2
+    var float TRANSITION_STEP = 0.018
+
+    shaders metapollo-signal-event-state
+
+endgroup
+
+
+# ============================================================
+# 11 — ACTIVITY STATE COMMIT: A -> PERSIST
+# ============================================================
+
+startgroup
+
+    attach
+    animation_step 16
+
+    output_texture persist
+
+    shaders metapollo-signal-copy-a
+
+endgroup
+
+
+# ============================================================
+# 12 — HUM + SIGNAL + FRONT GLASS  [FULL SOURCE FUSION]
+#
+# Visual equations/colors remain the old working ones.
+#
+# ACTIVE:
+#     old normal random tear
+#
+# SLEEP:
+#     old purple static + huge wobble
+#
+# NO SIGNAL:
+#     old NO SIGNAL screen
+#
+# WAKE:
+#     same old purple static + huge wobble
+# ============================================================
+
+startgroup
+
+    animation_step 16
+
+
+    # --------------------------------------------------------
+    # HUM — unchanged
+    # --------------------------------------------------------
+
+    var float HUM_X_PIXELS = 0.12
+    var float HUM_Y_PIXELS = 0.05
+
+    var float HUM_X_SPEED = 17.3
+    var float HUM_Y_SPEED = 13.7
+
+    var float HUM_SECONDARY = 0.24
+
+
+    # --------------------------------------------------------
+    # NORMAL TEAR — exact old values
+    # --------------------------------------------------------
+
+    var float EVENT_WINDOW = 11.0
+    var float EVENT_CHANCE = 0.22
+
+    var float TWO_REGION_CHANCE = 0.20
+    var float THREE_REGION_CHANCE = 0.05
+    var float CATASTROPHIC_THREE_CHANCE = 0.20
+
+    var float SHORT_DURATION_MIN = 0.09
+    var float SHORT_DURATION_MAX = 0.38
+
+    var float MEDIUM_DURATION_MIN = 0.45
+    var float MEDIUM_DURATION_MAX = 1.20
+
+    var float LONG_DURATION_MIN = 1.30
+    var float LONG_DURATION_MAX = 3.00
+
+    var float MEDIUM_DURATION_CHANCE = 0.19
+    var float LONG_DURATION_CHANCE = 0.05
+
+    var float MIN_BAND_HEIGHT = 0.10
+    var float MAX_BAND_HEIGHT = 0.34
+
+    var float SHIFT_PIXELS = 44.0
+    var float BEND_PIXELS = 6.0
+    var float SMEAR_PIXELS = 18.0
+
+    var float CHROMA_SPLIT_PIXELS = 1.4
+
+    var float TEAR_NOISE_STRENGTH = 0.09
+    var float TEAR_EDGE_GLOW = 0.12
+
+
+    # --------------------------------------------------------
+    # NO SIGNAL — exact old values
+    # --------------------------------------------------------
+
+    var float NS_SOURCE_VISIBILITY = 0.06
+    var float NS_DARK_FLOOR = 0.018
+
+    var float NS_NOISE_DENSITY = 0.060
+    var float NS_NOISE_STRENGTH = 0.54
+
+    var float NS_LINE_SPEED = 0.22
+    var float NS_LINE_DENSITY = 190.0
+    var float NS_LINE_STRENGTH = 0.10
+
+    var float NS_BAND_SPEED = 0.10
+    var float NS_BAND_HEIGHT = 0.035
+    var float NS_BAND_STRENGTH = 0.14
+
+    var float NS_STREAK_DENSITY = 0.0025
+    var float NS_STREAK_STRENGTH = 0.32
+
+    var float NS_SIGN_WIDTH = 0.38
+    var float NS_SIGN_HEIGHT = 0.115
+    var float NS_SIGN_OPACITY = 0.78
+
+    var float NS_TEXT_WIDTH = 0.285
+    var float NS_TEXT_HEIGHT = 0.052
+
+
+    # --------------------------------------------------------
+    # FRONT GLASS REFLECTION
+    #
+    # Merged into this group as the FINAL shader. The reflection
+    # shader only transforms the incoming `color`, so keeping it
+    # last preserves the previous signal -> reflection ordering
+    # without another full-screen group.
+    # --------------------------------------------------------
+
+        var float3 REFLECTION_TINT = float3(0.72, 0.68, 0.77)
+
+        # Broad diagonal glass glare
+        var float PRIMARY_STRENGTH = 0.075
+        var float GLARE_WIDTH = 0.22
+        var float GLARE_CORE_WIDTH = 0.055
+        var float GLARE_CORE_STRENGTH = 0.025
+        var float GLARE_CURVE = 0.10
+        var float GLARE_OFFSET = 0.02
+
+        # Long random reflection cycle
+        # One decision every 50 seconds. A failed roll means the glare
+        # can stay away for another entire window.
+        var float GLARE_EVENT_WINDOW = 50.0
+        var float GLARE_EVENT_CHANCE = 0.70
+        var float GLARE_DURATION_MIN = 6.0
+        var float GLARE_DURATION_MAX = 15.0
+
+        # Movement / shine during an active reflection
+        var float SHINE_TRAVEL = 0.20
+        var float SHINE_PULSE = 0.16
+        var float BASE_GLASS_STRENGTH = 0.006
+
+        # Soft upper glass sheen
+        var float SECONDARY_STRENGTH = 0.035
+        var float SHEEN_WIDTH = 0.48
+        var float SHEEN_HEIGHT = 0.30
+        var float SHEEN_X = 0.36
+        var float SHEEN_Y = 0.79
+
+        # How visible the reflection is over dark/bright content
+        var float DARK_VISIBILITY = 0.90
+        var float BRIGHT_VISIBILITY = 0.22
+
+    shaders metapollo-hum-signal-reflection
+
+endgroup

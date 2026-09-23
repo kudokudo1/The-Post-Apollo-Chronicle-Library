@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+
+SIDE="$HOME/.config/post-apollo-tv/side.qml"
+DECK="$HOME/.config/post-apollo-tv/deck.qml"
+TV_GEOMETRY="$HOME/.config/post-apollo-tv/TvGeometry.py"
+
+wait_for_app_id() {
+    local app_id="$1"
+
+    for _ in $(seq 1 100); do
+        if swaymsg -t get_tree | command grep -q "\"app_id\": \"$app_id\""; then
+            return 0
+        fi
+
+        sleep 0.05
+    done
+
+    return 1
+}
+
+wait_for_title() {
+    local title="$1"
+
+    for _ in $(seq 1 100); do
+        if swaymsg -t get_tree | command grep -q "\"name\": \"$title\""; then
+            return 0
+        fi
+
+        sleep 0.05
+    done
+
+    return 1
+}
+
+# ============================================================
+# 1. TERMINAL / TV SCREEN
+# ============================================================
+
+ZELLIJ_BIN="$(command -v zellij)"
+
+env \
+    -u ZELLIJ \
+    -u ZELLIJ_SESSION_NAME \
+    -u ZELLIJ_PANE_ID \
+    kitty \
+        --class post-apollo-terminal \
+        --title "Post-Apollo Terminal" \
+        "$ZELLIJ_BIN" &
+
+wait_for_app_id "post-apollo-terminal"
+
+swaymsg '[app_id="post-apollo-terminal"] focus'
+
+# ============================================================
+# 2. DECK UNDER TERMINAL
+# ============================================================
+
+swaymsg splitv
+
+quickshell -p "$DECK" &
+
+wait_for_title "Post-Apollo Deck"
+
+swaymsg '[title="Post-Apollo Deck"] border none'
+
+# ============================================================
+# 3. SIDE PANEL BESIDE TERMINAL ONLY
+# ============================================================
+
+swaymsg '[app_id="post-apollo-terminal"] focus'
+
+swaymsg splith
+
+quickshell -p "$SIDE" &
+
+wait_for_title "Post-Apollo Side"
+
+swaymsg '[title="Post-Apollo Side"] border none'
+
+# ============================================================
+# 4. PHYSICAL PROPORTIONS
+# ============================================================
+
+swaymsg '[title="Post-Apollo Side"] resize set width 210 px'
+swaymsg '[title="Post-Apollo Deck"] resize set height 260 px'
+
+# ============================================================
+# 5. FAST SHARED TV GEOMETRY
+# ============================================================
+#
+# Let Sway build the familiar tiled arrangement first. TvGeometry.py reads
+# those exact rectangles, converts all three pieces to floating windows, then
+# keeps them locked together with the same fast direct-IPC strategy used by
+# the Discord/social module.
+
+if [[ -f "$TV_GEOMETRY" ]]; then
+    # Do not stack multiple geometry followers if the launcher is run twice.
+    pkill -f "$TV_GEOMETRY" 2>/dev/null || true
+
+    nohup python3 "$TV_GEOMETRY" --interval-ms 8 \
+        >"$HOME/.cache/post-apollo-tv-geometry.log" 2>&1 &
+fi
+
+# Return keyboard focus to the actual terminal.
+sleep 0.10
+swaymsg '[app_id="post-apollo-terminal"] focus'

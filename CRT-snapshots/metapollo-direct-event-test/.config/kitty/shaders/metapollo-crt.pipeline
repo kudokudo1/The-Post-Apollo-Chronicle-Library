@@ -1,0 +1,27 @@
+# ============================================================
+# METAPOLLO DIRECT EVENT TEST
+#
+# Purpose: bypass a/b/persist/controller entirely.
+# If Kitty starts these event groups, their shader paints the
+# backbuffer directly.
+#
+# Expected:
+#   user-idle     -> GREEN screen for 500 ms
+#   user-activity -> YELLOW screen for 500 ms
+# ============================================================
+
+startgroup
+    animation_start user-idle
+    animation_stop 500
+    animation_step 16
+    var int EVENT_KIND = 1
+    shaders metapollo-event-direct
+endgroup
+
+startgroup
+    animation_start user-activity
+    animation_stop 500
+    animation_step 16
+    var int EVENT_KIND = 2
+    shaders metapollo-event-direct
+endgroup

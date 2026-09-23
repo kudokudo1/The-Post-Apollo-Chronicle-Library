@@ -1,0 +1,24 @@
+# Editor/temporary files
+*~
+*.swp
+*.swo
+*.tmp
+
+# Runtime junk
+*.log
+*.pid
+
+# Secrets/local overrides
+.env
+.env.*
+*.pem
+*.key
+
+# Cache
+.cache/
+__pycache__/
+*.pyc
+
+# OS metadata
+.DS_Store
+Thumbs.db

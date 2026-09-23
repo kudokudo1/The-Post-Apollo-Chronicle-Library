@@ -1,0 +1,7939 @@
+import QtQuick
+import QtQuick.Layouts
+import Quickshell
+import Quickshell.I3
+import Quickshell.Io
+import "../components"
+import QtQuick.Effects
+import Qt5Compat.GraphicalEffects
+
+PanelWindow {
+    id: appControlWindow
+
+    // ============================================================
+    // STATE
+    // ============================================================
+
+    property bool menuOpen: false
+
+    // ============================================================
+    // IPC / SWAY GLOBAL TOGGLE
+    // ============================================================
+    //
+    // Sway owns the global Mod+D keybind. It calls:
+    //
+    //     qs ipc call appControl toggle
+    //
+    // Keep the function/return types explicit: Quickshell only exposes
+    // typed IPC functions.
+    IpcHandler {
+        target: "appControl"
+
+        function toggle(): void {
+            appControlWindow.menuOpen = !appControlWindow.menuOpen;
+        }
+
+        function open(): void {
+            appControlWindow.menuOpen = true;
+        }
+
+        function close(): void {
+            appControlWindow.menuOpen = false;
+        }
+
+        function isOpen(): bool {
+            return appControlWindow.menuOpen;
+        }
+    }
+
+    readonly property int favoritesModeIndex: 0
+    readonly property int appsModeIndex: 1
+    readonly property int runModeIndex: 2
+    readonly property int windowsModeIndex: 3
+    readonly property int killModeIndex: 4
+
+    // FAVORITES is visually first, but APPS is the default focus.
+    property int selectedModeIndex: appsModeIndex
+    property int selectedResultIndex: 0
+
+    property bool keyboardActive: false
+    property bool detailFocused: false
+    property int selectedDetailActionIndex: 0
+    property int hoveredResultIndex: -1
+
+    onSelectedResultIndexChanged: scheduleRunKillProbe()
+    onSelectedModeIndexChanged: scheduleRunKillProbe()
+
+    // FAVORITES rail-face state.
+    property bool favoritesFaceClickPulse: false
+    property bool favoritesFaceBlinking: false
+    property bool favoritesFaceDoubleBlinkPending: false
+
+    // KITTY prefix-face state.
+    //
+    // This deliberately has its OWN random schedule and timers so it never
+    // locks to the FAVORITES face rhythm.
+    property bool kittyFaceClickPulse: false
+    property bool kittyFaceBlinking: false
+    property bool kittyFaceDoubleBlinkPending: false
+
+    function scheduleFavoritesFaceBlink() {
+        if (!menuOpen)
+            return;
+
+        favoritesFaceBlinkTimer.interval =
+            6500 + Math.floor(Math.random() * 6000);
+
+        favoritesFaceBlinkTimer.restart();
+    }
+
+    Timer {
+        id: favoritesFaceBlinkTimer
+
+        repeat: false
+
+        onTriggered: {
+            // Most blinks are single. Occasionally queue a second blink.
+            appControlWindow.favoritesFaceDoubleBlinkPending =
+                Math.random() < 0.38;
+
+            appControlWindow.favoritesFaceBlinking = true;
+            favoritesFaceBlinkEndTimer.restart();
+        }
+    }
+
+    Timer {
+        id: favoritesFaceBlinkEndTimer
+
+        interval: 170
+        repeat: false
+
+        onTriggered: {
+            appControlWindow.favoritesFaceBlinking = false;
+
+            if (appControlWindow.favoritesFaceDoubleBlinkPending) {
+                appControlWindow.favoritesFaceDoubleBlinkPending = false;
+                favoritesFaceSecondBlinkGapTimer.restart();
+            } else {
+                appControlWindow.scheduleFavoritesFaceBlink();
+            }
+        }
+    }
+
+    Timer {
+        id: favoritesFaceSecondBlinkGapTimer
+
+        interval: 125
+        repeat: false
+
+        onTriggered: {
+            appControlWindow.favoritesFaceBlinking = true;
+            favoritesFaceSecondBlinkEndTimer.restart();
+        }
+    }
+
+    Timer {
+        id: favoritesFaceSecondBlinkEndTimer
+
+        interval: 170
+        repeat: false
+
+        onTriggered: {
+            appControlWindow.favoritesFaceBlinking = false;
+            appControlWindow.scheduleFavoritesFaceBlink();
+        }
+    }
+
+    Timer {
+        id: favoritesFaceClickPulseTimer
+
+        interval: 420
+        repeat: false
+
+        onTriggered: {
+            appControlWindow.favoritesFaceClickPulse = false;
+        }
+    }
+
+    function scheduleKittyFaceBlink() {
+        if (!menuOpen)
+            return;
+
+        // A different timing range plus independent random choices prevents
+        // the two faces from behaving like synchronized indicators.
+        kittyFaceBlinkTimer.interval =
+            8000 + Math.floor(Math.random() * 7500);
+
+        kittyFaceBlinkTimer.restart();
+    }
+
+    Timer {
+        id: kittyFaceBlinkTimer
+
+        repeat: false
+
+        onTriggered: {
+            appControlWindow.kittyFaceDoubleBlinkPending =
+                Math.random() < 0.42;
+
+            appControlWindow.kittyFaceBlinking = true;
+            kittyFaceBlinkEndTimer.restart();
+        }
+    }
+
+    Timer {
+        id: kittyFaceBlinkEndTimer
+
+        interval: 155
+        repeat: false
+
+        onTriggered: {
+            appControlWindow.kittyFaceBlinking = false;
+
+            if (appControlWindow.kittyFaceDoubleBlinkPending) {
+                appControlWindow.kittyFaceDoubleBlinkPending = false;
+                kittyFaceSecondBlinkGapTimer.restart();
+            } else {
+                appControlWindow.scheduleKittyFaceBlink();
+            }
+        }
+    }
+
+    Timer {
+        id: kittyFaceSecondBlinkGapTimer
+
+        interval: 140
+        repeat: false
+
+        onTriggered: {
+            appControlWindow.kittyFaceBlinking = true;
+            kittyFaceSecondBlinkEndTimer.restart();
+        }
+    }
+
+    Timer {
+        id: kittyFaceSecondBlinkEndTimer
+
+        interval: 155
+        repeat: false
+
+        onTriggered: {
+            appControlWindow.kittyFaceBlinking = false;
+            appControlWindow.scheduleKittyFaceBlink();
+        }
+    }
+
+    Timer {
+        id: kittyFaceClickPulseTimer
+
+        interval: 420
+        repeat: false
+
+        onTriggered: {
+            appControlWindow.kittyFaceClickPulse = false;
+        }
+    }
+
+    // Exact visible spacing between app rows and their neighboring edges.
+    property int appSelectorRowGap: 6
+
+
+    // Keep the selected application stable while cycling through modes.
+    property string rememberedAppKey: ""
+
+    // Live Sway window snapshot used by APPS mode.
+    property var swayWindows: []
+    property bool windowDataReady: false
+    property string windowDataError: ""
+
+    property var selectedAppWindows: {
+        if (!selectedResultIsApplication())
+            return [];
+
+        return windowsForApp(selectedResult());
+    }
+
+    // ============================================================
+    // MODE DATA
+    // ============================================================
+
+    property var modes: [
+        {
+            name: "FAVORITES",
+            symbol: "(˵✧ᴗ✧˵)"
+        },
+        {
+            name: "APPS",
+            symbol: "-⋆♱⋆-"
+        },
+        {
+            name: "RUN",
+            symbol: "⌯✎﹏﹏"
+        },
+        {
+            name: "WINDOWS",
+            symbol: "🃁🂡🂱🃑"
+        },
+        {
+            name: "KILL",
+            symbol: "(-_•)︻デ═一"
+        }
+    ]
+
+    // Temporary Phase 1 placeholder content.
+    property var placeholderResults: [
+        {
+            label: "OPTION 01"
+        },
+        {
+            label: "OPTION 02"
+        },
+        {
+            label: "OPTION 03"
+        },
+        {
+            label: "OPTION 04"
+        },
+        {
+            label: "OPTION 05"
+        }
+    ]
+
+    // ============================================================
+    // RUN MODE
+    // ============================================================
+    //
+    // RUN uses the shared selector/search field as a command input. The
+    // current typed command becomes the first result, followed by matching
+    // saved favorites and recent in-memory history. Only commands explicitly
+    // favorited are persisted; ordinary command history is session-local.
+    // Commands are executed detached
+    // through the user's login shell so pipes, redirects, variables, etc.
+    // work as expected.
+    //
+    // Favorite RUN commands are encoded directly into favoriteKeys using:
+    //
+    //     run:<encodeURIComponent(command)>
+    //
+    // That makes RUN favorites reconstructable after a Quickshell restart
+    // without introducing a second favorite database.
+
+    property var modeInputTexts: ({})
+    property var runHistory: []
+    readonly property int runHistoryLimit: 40
+
+    // Conditional RUN termination action.
+    //
+    // The KILL button is deliberately conservative: it only appears when
+    // the selected command has a simple executable name that we can map to
+    // an exact process name AND a matching process is currently running.
+    // This avoids offering a destructive action for shell pipelines,
+    // interpreters, wrappers, services, etc. where "kill this command"
+    // would be ambiguous.
+    property string runKillProbeTarget: ""
+    property string runKillResolvedTarget: ""
+    property var runKillPids: []
+    property bool runKillAvailable: false
+
+    // RUN prefix selector.
+    //
+    // NORMAL executes the entered command as-is.
+    // KITTY literally prefixes the command with "kitty " before sending it
+    // through the same login-shell execution path.
+    readonly property int runPrefixNormal: 0
+    readonly property int runPrefixKitty: 1
+    property int runPrefixMode: runPrefixNormal
+
+    // RUN list selector.
+    //
+    // USER = the uncluttered mode we already had:
+    //        exact typed command + RUN favorites + session history.
+    //
+    // ALL  = a Rofi-run-style catalog of executable command names found
+    //        in the user's current $PATH. This lives in a separate view so
+    //        thousands of commands never clutter USER/history mode.
+    readonly property int runListUser: 0
+    readonly property int runListTerminal: 1
+    readonly property int runListAll: 2
+    property int runListMode: runListUser
+
+    property var runTerminalHistory: []
+    property bool runTerminalHistoryLoaded: false
+    property bool runTerminalHistoryLoading: false
+    property string runTerminalHistoryError: ""
+
+    property var runAllCommands: []
+    property bool runAllCommandsLoaded: false
+    property bool runAllCommandsLoading: false
+    property string runAllCommandsError: ""
+
+    function runKillTargetForCommand(command) {
+        const candidates = runKillCandidatesForCommand(command);
+        return candidates.length > 0 ? candidates[0] : "";
+    }
+
+    function runKillCandidatesForCommand(command) {
+        const normalized = String(command || "").trim();
+
+        if (!normalized)
+            return [];
+
+        // Only inspect a simple leading executable token. Complex shell
+        // syntax remains intentionally ineligible for a destructive action.
+        const match = normalized.match(
+            /^([A-Za-z0-9_./+@%:-]+)(?:\s|$)/
+        );
+
+        if (!match || !match[1])
+            return [];
+
+        let executable = String(match[1]);
+        const slash = executable.lastIndexOf("/");
+
+        if (slash >= 0)
+            executable = executable.slice(slash + 1);
+
+        if (!executable)
+            return [];
+
+        const blocked = {
+            "sudo": true,
+            "doas": true,
+            "env": true,
+            "exec": true,
+            "sh": true,
+            "bash": true,
+            "zsh": true,
+            "fish": true,
+            "python": true,
+            "python3": true,
+            "perl": true,
+            "ruby": true,
+            "node": true,
+            "java": true,
+            "kitty": true,
+            "flatpak": true,
+            "systemctl": true,
+            "swaymsg": true,
+            "kill": true,
+            "pkill": true,
+            "pgrep": true
+        };
+
+        if (blocked[executable])
+            return [];
+
+        const candidates = [];
+
+        function addCandidate(value) {
+            const candidate = String(value || "").trim();
+
+            if (!candidate || blocked[candidate])
+                return;
+
+            if (candidates.indexOf(candidate) === -1)
+                candidates.push(candidate);
+        }
+
+        addCandidate(executable);
+
+        // Common launcher/wrapper suffixes often disappear once the real
+        // process starts. Keep progressively simpler equivalents so e.g.
+        // brave-browser-stable can match brave.
+        const suffixes = [
+            "-stable",
+            "-beta",
+            "-dev",
+            "-bin"
+        ];
+
+        let simplified = executable;
+
+        for (let i = 0; i < suffixes.length; i++) {
+            const suffix = suffixes[i];
+
+            if (simplified.endsWith(suffix)) {
+                simplified =
+                    simplified.slice(0, -suffix.length);
+                addCandidate(simplified);
+                break;
+            }
+        }
+
+        if (simplified.endsWith("-browser")) {
+            addCandidate(
+                simplified.slice(
+                    0,
+                    -"-browser".length
+                )
+            );
+        }
+
+        // A few common wrapper -> real-process equivalents.
+        const aliases = {
+            "brave-browser-stable": ["brave-browser", "brave"],
+            "brave-browser": ["brave"],
+            "google-chrome-stable": ["google-chrome", "chrome"],
+            "google-chrome": ["chrome"],
+            "chromium-browser": ["chromium"]
+        };
+
+        const mapped = aliases[executable] || [];
+
+        for (let i = 0; i < mapped.length; i++)
+            addCandidate(mapped[i]);
+
+        return candidates;
+    }
+
+    function currentRunKillTarget() {
+        const candidates = currentRunKillCandidates();
+        return candidates.length > 0 ? candidates[0] : "";
+    }
+
+    function currentRunKillCandidates() {
+        if (!selectedResultIsRun())
+            return [];
+
+        const entry = selectedResult();
+        const sourceEntry = favoriteSourceItem(entry) || entry;
+
+        return runKillCandidatesForCommand(
+            runCommandText(sourceEntry)
+        );
+    }
+
+    function scheduleRunKillProbe() {
+        runKillAvailable = false;
+        runKillProbeTarget = "";
+        runKillResolvedTarget = "";
+        runKillPids = [];
+
+        if (!menuOpen || !selectedResultIsRun())
+            return;
+
+        runKillProbeTimer.restart();
+    }
+
+    function executeRunKillAction() {
+        if (!runKillAvailable || runKillPids.length === 0)
+            return;
+
+        const argv = [
+            "/usr/bin/kill",
+            "-TERM",
+            "--"
+        ];
+
+        for (let i = 0; i < runKillPids.length; i++)
+            argv.push(String(runKillPids[i]));
+
+        console.log(
+            "AppControl: RUN TERMINATE",
+            runKillResolvedTarget,
+            "PIDs:",
+            runKillPids.join(", ")
+        );
+
+        // TERM is deliberate. FORCE/SIGKILL belongs in the dedicated KILL
+        // mode rather than this contextual RUN action.
+        Quickshell.execDetached(argv);
+
+        // Keep AppControl open after terminating the target. Re-probe shortly
+        // afterward so the KILL button can update to [NO TARGET] once the
+        // process actually exits.
+        runKillRefreshTimer.restart();
+    }
+
+    Timer {
+        id: runKillRefreshTimer
+
+        interval: 350
+        repeat: false
+
+        onTriggered: {
+            appControlWindow.scheduleRunKillProbe();
+        }
+    }
+
+    Timer {
+        id: runKillProbeTimer
+
+        interval: 70
+        repeat: false
+
+        onTriggered: {
+            const candidates =
+                appControlWindow.currentRunKillCandidates();
+
+            appControlWindow.runKillAvailable = false;
+            appControlWindow.runKillPids = [];
+            appControlWindow.runKillResolvedTarget = "";
+            appControlWindow.runKillProbeTarget =
+                candidates.join("\u0000");
+
+            if (candidates.length === 0)
+                return;
+
+            // Use ps rather than pgrep -x. Linux process `comm` names can be
+            // truncated and wrapper commands frequently exec a differently
+            // named binary, which is why the previous probe never exposed
+            // KILL for commands such as brave-browser-stable.
+            runKillProbeProcess.exec([
+                "/usr/bin/ps",
+                "-eo",
+                "pid=,comm=,args="
+            ]);
+        }
+    }
+
+    Process {
+        id: runKillProbeProcess
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const candidates =
+                    appControlWindow.currentRunKillCandidates();
+                const signature = candidates.join("\u0000");
+
+                // Selection changed while ps was running.
+                if (!signature
+                        || signature
+                           !== appControlWindow.runKillProbeTarget) {
+                    appControlWindow.runKillAvailable = false;
+                    appControlWindow.runKillPids = [];
+                    appControlWindow.runKillResolvedTarget = "";
+                    return;
+                }
+
+                const pids = [];
+                let resolvedTarget = "";
+                const lines = String(text || "").split("\n");
+
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i];
+
+                    // pid, comm, then the complete command line.
+                    const match = line.match(
+                        /^\s*([0-9]+)\s+(\S+)\s+(.*)$/
+                    );
+
+                    if (!match)
+                        continue;
+
+                    const pid = Number(match[1]);
+                    const comm = String(match[2] || "");
+                    const args = String(match[3] || "").trim();
+
+                    if (!pid || !args)
+                        continue;
+
+                    // Match more than just argv[0]. Shell scripts
+                    // commonly appear as:
+                    //
+                    //   zsh /path/to/pipes.sh
+                    //   bash ./script.sh
+                    //
+                    // so the real process `comm` is zsh/bash even though the
+                    // RUN command the user selected is pipes.sh. Inspect every
+                    // argv token and compare its basename to the candidate.
+                    const argvTokens = args.split(/\s+/);
+                    const argBases = [];
+
+                    for (let a = 0; a < argvTokens.length; a++) {
+                        const token = String(argvTokens[a] || "");
+
+                        if (!token)
+                            continue;
+
+                        const slash = token.lastIndexOf("/");
+                        const base =
+                            slash >= 0
+                            ? token.slice(slash + 1)
+                            : token;
+
+                        if (base)
+                            argBases.push(base);
+                    }
+
+                    for (let c = 0; c < candidates.length; c++) {
+                        const candidate = candidates[c];
+
+                        if (comm === candidate
+                                || argBases.indexOf(candidate) !== -1) {
+                            if (pids.indexOf(pid) === -1)
+                                pids.push(pid);
+
+                            if (!resolvedTarget)
+                                resolvedTarget = candidate;
+
+                            break;
+                        }
+                    }
+                }
+
+                appControlWindow.runKillPids = pids;
+                appControlWindow.runKillResolvedTarget =
+                    resolvedTarget;
+                appControlWindow.runKillAvailable =
+                    pids.length > 0;
+
+                console.log(
+                    "AppControl: RUN kill probe",
+                    "candidates=" + candidates.join(","),
+                    "resolved=" + resolvedTarget,
+                    "pids=" + pids.join(",")
+                );
+            }
+        }
+
+        stderr: StdioCollector {
+            onStreamFinished: {
+                if (text.trim().length > 0) {
+                    console.log(
+                        "AppControl: RUN kill probe:",
+                        text.trim()
+                    );
+                }
+            }
+        }
+    }
+
+    function runShellPath() {
+        const shell = Quickshell.env("SHELL");
+        return shell && String(shell).length > 0
+               ? String(shell)
+               : "/bin/sh";
+    }
+
+    function runShellName() {
+        const shell = runShellPath();
+        const parts = shell.split("/");
+        return parts.length > 0 ? parts[parts.length - 1] : shell;
+    }
+
+    function runCommandText(entry) {
+        if (!entry)
+            return "";
+
+        if (entry.commandText !== undefined)
+            return String(entry.commandText || "").trim();
+
+        if (typeof entry.command === "string")
+            return String(entry.command).trim();
+
+        return String(entry.label || entry.name || "").trim();
+    }
+
+    function runPrefixModeForEntry(entry) {
+        if (entry && entry._runPrefixMode !== undefined)
+            return Number(entry._runPrefixMode);
+
+        return runPrefixNormal;
+    }
+
+    function runPrefixName(prefixMode) {
+        return prefixMode === runPrefixKitty
+               ? "KITTY"
+               : "NORMAL";
+    }
+
+    function runPrefixSymbol(prefixMode) {
+        return prefixMode === runPrefixKitty
+               ? "≽(^•⩊•^)≼"
+               : modes[runModeIndex].symbol;
+    }
+
+    function runEffectiveCommand(command, prefixMode) {
+        const normalized = String(command || "").trim();
+
+        if (!normalized)
+            return "";
+
+        if (prefixMode === runPrefixKitty) {
+            // Avoid an accidental "kitty kitty ..." if the user already
+            // typed kitty explicitly while the KITTY prefix is selected.
+            if (normalized === "kitty"
+                    || normalized.indexOf("kitty ") === 0)
+                return normalized;
+
+            return "kitty " + normalized;
+        }
+
+        return normalized;
+    }
+
+    function runFavoriteKey(command, prefixMode) {
+        const normalized = String(command || "").trim();
+
+        if (!normalized)
+            return "";
+
+        // Keep the old normal-command key format for backward compatibility.
+        // Kitty-prefixed commands get their own namespace so the same raw
+        // command can be favorited once as NORMAL and once as KITTY.
+        if (prefixMode === runPrefixKitty)
+            return "run:kitty:" + encodeURIComponent(normalized);
+
+        return "run:" + encodeURIComponent(normalized);
+    }
+
+    function runFavoriteDataFromKey(key) {
+        const raw = String(key || "");
+
+        if (raw.indexOf("run:") !== 0)
+            return null;
+
+        let prefixMode = runPrefixNormal;
+        let encoded = raw.slice(4);
+
+        if (raw.indexOf("run:kitty:") === 0) {
+            prefixMode = runPrefixKitty;
+            encoded = raw.slice(10);
+        }
+
+        try {
+            const command = decodeURIComponent(encoded);
+
+            if (!command)
+                return null;
+
+            return {
+                commandText: command,
+                prefixMode: prefixMode
+            };
+        } catch (error) {
+            console.log("AppControl: invalid RUN favorite key:", raw);
+            return null;
+        }
+    }
+
+    function runFavoriteCommandFromKey(key) {
+        const data = runFavoriteDataFromKey(key);
+        return data ? data.commandText : "";
+    }
+
+    function runRecord(command, origin, prefixMode) {
+        const normalized = String(command || "").trim();
+        const resolvedPrefix = prefixMode === runPrefixKitty
+                               ? runPrefixKitty
+                               : runPrefixNormal;
+
+        return {
+            _runRecord: true,
+            _runOrigin: origin || "COMMAND",
+            _runPrefixMode: resolvedPrefix,
+
+            id: runFavoriteKey(normalized, resolvedPrefix),
+            label: normalized,
+            name: normalized,
+            commandText: normalized,
+            genericName: "RUN COMMAND",
+            comment: (origin || "COMMAND")
+                     + " • "
+                     + runPrefixName(resolvedPrefix)
+                     + " • "
+                     + runShellName().toUpperCase(),
+            keywords: "",
+            icon: "",
+            actions: [],
+            startupClass: ""
+        };
+    }
+
+    function rememberRunHistory(command, prefixMode) {
+        const normalized = String(command || "").trim();
+        const resolvedPrefix = prefixMode === runPrefixKitty
+                               ? runPrefixKitty
+                               : runPrefixNormal;
+
+        if (!normalized)
+            return;
+
+        const next = [];
+
+        next.push({
+            commandText: normalized,
+            prefixMode: resolvedPrefix
+        });
+
+        for (let i = 0; i < runHistory.length; i++) {
+            const existing = runHistory[i];
+
+            const existingCommand =
+                typeof existing === "object"
+                ? String(existing.commandText || "").trim()
+                : String(existing || "").trim();
+
+            const existingPrefix =
+                typeof existing === "object"
+                && existing.prefixMode === runPrefixKitty
+                ? runPrefixKitty
+                : runPrefixNormal;
+
+            if (!existingCommand)
+                continue;
+
+            if (existingCommand === normalized
+                    && existingPrefix === resolvedPrefix)
+                continue;
+
+            next.push({
+                commandText: existingCommand,
+                prefixMode: existingPrefix
+            });
+
+            if (next.length >= runHistoryLimit)
+                break;
+        }
+
+        runHistory = next;
+    }
+
+    function executeRunCommand(command, prefixMode) {
+        const normalized = String(command || "").trim();
+        const resolvedPrefix = prefixMode === runPrefixKitty
+                               ? runPrefixKitty
+                               : runPrefixNormal;
+
+        if (!normalized)
+            return;
+
+        const effectiveCommand =
+            runEffectiveCommand(normalized, resolvedPrefix);
+
+        rememberRunHistory(normalized, resolvedPrefix);
+
+        console.log(
+            "AppControl: RUN",
+            "[" + runPrefixName(resolvedPrefix) + "]",
+            runShellPath(),
+            "-lc",
+            effectiveCommand
+        );
+
+        Quickshell.execDetached([
+            runShellPath(),
+            "-lc",
+            effectiveCommand
+        ]);
+
+        menuOpen = false;
+    }
+
+    function shellQuote(value) {
+        // POSIX-safe single-quote escaping for the small Sway/Kitty wrapper
+        // used by the FLOAT alternate action.
+        return "'" + String(value || "").replace(/'/g, "'\"'\"'") + "'";
+    }
+
+    function executeRunFloatCommand(command) {
+        const normalized = String(command || "").trim();
+
+        if (!normalized)
+            return;
+
+        rememberRunHistory(normalized, runPrefixKitty);
+
+        // Give every floating launch its own app_id so the temporary Sway
+        // rule only applies to this one Kitty window.
+        const floatAppId =
+            "appcontrol-float-" + String(Date.now());
+
+        const swayCriteria =
+            '[app_id="' + floatAppId + '"]';
+
+        const swayRule =
+            "for_window "
+            + swayCriteria
+            + " floating enable, move position center";
+
+        const script =
+            "swaymsg "
+            + shellQuote(swayRule)
+            + " >/dev/null 2>&1; "
+            + "exec kitty"
+            + " --class "
+            + shellQuote(floatAppId)
+            + " --title "
+            + shellQuote("Float")
+            + " "
+            + shellQuote(runShellPath())
+            + " -lc "
+            + shellQuote(normalized);
+
+        console.log(
+            "AppControl: RUN FLOAT",
+            normalized,
+            "app_id:",
+            floatAppId
+        );
+
+        Quickshell.execDetached([
+            runShellPath(),
+            "-lc",
+            script
+        ]);
+
+        menuOpen = false;
+    }
+
+    function executeRunFullscreenCommand(command) {
+        const normalized = String(command || "").trim();
+
+        if (!normalized)
+            return;
+
+        rememberRunHistory(normalized, runPrefixKitty);
+
+        // Unique app_id lets Sway target only this Kitty instance.
+        const fullscreenAppId =
+            "appcontrol-fullscreen-" + String(Date.now());
+
+        const swayCriteria =
+            '[app_id="' + fullscreenAppId + '"]';
+
+        const swayRule =
+            "for_window "
+            + swayCriteria
+            + " fullscreen enable";
+
+        const script =
+            "swaymsg "
+            + shellQuote(swayRule)
+            + " >/dev/null 2>&1; "
+            + "exec kitty"
+            + " --class "
+            + shellQuote(fullscreenAppId)
+            + " --title "
+            + shellQuote("Fullscreen")
+            + " "
+            + shellQuote(runShellPath())
+            + " -lc "
+            + shellQuote(normalized);
+
+        console.log(
+            "AppControl: RUN FULLSCREEN",
+            normalized,
+            "app_id:",
+            fullscreenAppId
+        );
+
+        Quickshell.execDetached([
+            runShellPath(),
+            "-lc",
+            script
+        ]);
+
+        menuOpen = false;
+    }
+
+    function setRunPrefixMode(prefixMode) {
+        const nextMode = prefixMode === runPrefixKitty
+                         ? runPrefixKitty
+                         : runPrefixNormal;
+
+        if (runPrefixMode === nextMode)
+            return;
+
+        runPrefixMode = nextMode;
+
+        // Rebuild the typed-command row with the new prefix identity while
+        // keeping the user's input text untouched.
+        Qt.callLater(function() {
+            if (selectedModeIndex === runModeIndex) {
+                resetResultSelection();
+                resetDetailActionSelection();
+                searchInput.forceActiveFocus();
+            }
+        });
+    }
+
+    function consumeRunTerminalHistory(output) {
+        const lines = String(output || "").split("\n");
+        const rows = [];
+
+        for (let i = 0; i < lines.length; i++) {
+            const command = String(lines[i] || "").trim();
+
+            if (!command)
+                continue;
+
+            rows.push(command);
+        }
+
+        runTerminalHistory = rows;
+        runTerminalHistoryLoaded = true;
+        runTerminalHistoryLoading = false;
+        runTerminalHistoryError = "";
+
+        console.log(
+            "AppControl: loaded",
+            rows.length,
+            "recent terminal-history rows"
+        );
+
+        if (selectedModeIndex === runModeIndex
+                && runListMode === runListTerminal) {
+            Qt.callLater(function() {
+                resetResultSelection();
+                resetDetailActionSelection();
+            });
+        }
+    }
+
+    function refreshRunTerminalHistory() {
+        if (runTerminalHistoryLoading)
+            return;
+
+        runTerminalHistoryLoading = true;
+        runTerminalHistoryError = "";
+
+        // Read the user's real shell history rather than mixing it into the
+        // AppControl USER-session history. Output is newest-first.
+        //
+        // Supported directly:
+        //   bash -> ~/.bash_history (or $HISTFILE)
+        //   zsh  -> ~/.zsh_history  (or $HISTFILE), including extended format
+        //   fish -> fish_history YAML-ish "- cmd:" rows
+        //
+        // Unknown shells fall back to the common bash/zsh files when present.
+        const historyScript =
+            "shell=${SHELL##*/}; "
+            + "case \"$shell\" in "
+            + "fish) "
+            + "  f=\"$HOME/.local/share/fish/fish_history\"; "
+            + "  if [ -r \"$f\" ]; then "
+            + "    sed -n 's/^- cmd: //p' \"$f\" | tail -n 800 | tac; "
+            + "  fi; "
+            + "  ;; "
+            + "zsh) "
+            + "  f=\"${HISTFILE:-$HOME/.zsh_history}\"; "
+            + "  if [ -r \"$f\" ]; then "
+            + "    tail -n 800 \"$f\" "
+            + "      | sed -E 's/^: [0-9]+:[0-9]+;//' "
+            + "      | tac; "
+            + "  fi; "
+            + "  ;; "
+            + "bash) "
+            + "  f=\"${HISTFILE:-$HOME/.bash_history}\"; "
+            + "  if [ -r \"$f\" ]; then "
+            + "    tail -n 800 \"$f\" "
+            + "      | sed -E '/^#[0-9]{9,}$/d' "
+            + "      | tac; "
+            + "  fi; "
+            + "  ;; "
+            + "*) "
+            + "  if [ -n \"$HISTFILE\" ] && [ -r \"$HISTFILE\" ]; then "
+            + "    tail -n 800 \"$HISTFILE\" "
+            + "      | sed -E 's/^: [0-9]+:[0-9]+;//; /^#[0-9]{9,}$/d' "
+            + "      | tac; "
+            + "  elif [ -r \"$HOME/.zsh_history\" ]; then "
+            + "    tail -n 800 \"$HOME/.zsh_history\" "
+            + "      | sed -E 's/^: [0-9]+:[0-9]+;//' "
+            + "      | tac; "
+            + "  elif [ -r \"$HOME/.bash_history\" ]; then "
+            + "    tail -n 800 \"$HOME/.bash_history\" "
+            + "      | sed -E '/^#[0-9]{9,}$/d' "
+            + "      | tac; "
+            + "  fi; "
+            + "  ;; "
+            + "esac";
+
+        runTerminalHistoryProcess.exec([
+            "/bin/sh",
+            "-lc",
+            historyScript
+        ]);
+    }
+
+    Process {
+        id: runTerminalHistoryProcess
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                appControlWindow.consumeRunTerminalHistory(text);
+            }
+        }
+
+        stderr: StdioCollector {
+            onStreamFinished: {
+                const message = text.trim();
+
+                if (message.length > 0) {
+                    appControlWindow.runTerminalHistoryError = message;
+                    console.log(
+                        "AppControl: terminal history:",
+                        message
+                    );
+                }
+
+                appControlWindow.runTerminalHistoryLoading = false;
+            }
+        }
+    }
+
+    function consumeRunAllCommands(output) {
+        const lines = String(output || "").split("\n");
+        const rows = [];
+        const seen = {};
+
+        for (let i = 0; i < lines.length; i++) {
+            const command = String(lines[i] || "").trim();
+
+            if (!command || seen[command])
+                continue;
+
+            seen[command] = true;
+            rows.push(command);
+        }
+
+        runAllCommands = rows;
+        runAllCommandsLoaded = true;
+        runAllCommandsLoading = false;
+        runAllCommandsError = "";
+
+        console.log(
+            "AppControl: loaded",
+            rows.length,
+            "RUN ALL commands from PATH"
+        );
+
+        if (selectedModeIndex === runModeIndex
+                && runListMode === runListAll) {
+            Qt.callLater(function() {
+                resetResultSelection();
+                resetDetailActionSelection();
+            });
+        }
+    }
+
+    function refreshRunAllCommands(force) {
+        if (runAllCommandsLoading)
+            return;
+
+        if (runAllCommandsLoaded && !force)
+            return;
+
+        runAllCommandsLoading = true;
+        runAllCommandsError = "";
+
+        // Scan executable files from every directory in the current PATH.
+        // Only basenames are exposed, matching the command names a normal
+        // run prompt expects rather than flooding the UI with full paths.
+        runAllCommandsProcess.exec([
+            "/bin/sh",
+            "-lc",
+            "IFS=:; "
+            + "for d in $PATH; do "
+            + "  [ -d \"$d\" ] || continue; "
+            + "  for f in \"$d\"/*; do "
+            + "    [ -f \"$f\" ] && [ -x \"$f\" ] "
+            + "      && printf '%s\\n' \"${f##*/}\"; "
+            + "  done; "
+            + "done | sort -u"
+        ]);
+    }
+
+    function setRunListMode(listMode) {
+        const nextMode = listMode === runListAll
+                         ? runListAll
+                         : listMode === runListTerminal
+                         ? runListTerminal
+                         : runListUser;
+
+        if (runListMode === nextMode) {
+            if (nextMode === runListAll
+                    && !runAllCommandsLoaded
+                    && !runAllCommandsLoading)
+                refreshRunAllCommands(false);
+
+            if (nextMode === runListTerminal)
+                refreshRunTerminalHistory();
+
+            return;
+        }
+
+        runListMode = nextMode;
+
+        if (nextMode === runListAll)
+            refreshRunAllCommands(false);
+        else if (nextMode === runListTerminal)
+            refreshRunTerminalHistory();
+
+        Qt.callLater(function() {
+            if (selectedModeIndex === runModeIndex) {
+                resetResultSelection();
+                resetDetailActionSelection();
+                searchInput.forceActiveFocus();
+            }
+        });
+    }
+
+    Process {
+        id: runAllCommandsProcess
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                appControlWindow.consumeRunAllCommands(text);
+            }
+        }
+
+        stderr: StdioCollector {
+            onStreamFinished: {
+                const message = text.trim();
+
+                if (message.length > 0) {
+                    appControlWindow.runAllCommandsError = message;
+                    console.log(
+                        "AppControl: RUN ALL command scan:",
+                        message
+                    );
+                }
+
+                appControlWindow.runAllCommandsLoading = false;
+            }
+        }
+    }
+
+    function saveInputForMode(modeIndex) {
+        if (!searchInput)
+            return;
+
+        const next = Object.assign({}, modeInputTexts);
+        next[String(modeIndex)] = searchInput.text;
+        modeInputTexts = next;
+    }
+
+    function restoreInputForMode(modeIndex) {
+        const key = String(modeIndex);
+        const value = modeInputTexts[key] !== undefined
+                      ? modeInputTexts[key]
+                      : "";
+
+        if (searchInput.text !== value)
+            searchInput.text = value;
+    }
+
+    // ============================================================
+    // FAVORITES
+    // ============================================================
+
+    FileView {
+        id: favoriteStoreFile
+
+        path: Quickshell.dataDir + "/appcontrol-favorites.json"
+        watchChanges: true
+
+        onFileChanged: reload()
+        onAdapterUpdated: writeAdapter()
+
+        JsonAdapter {
+            id: favoriteStore
+
+            property list<string> favoriteKeys: []
+        }
+    }
+
+    function isApplicationMode(modeIndex) {
+        // FAVORITES is mixed now, so mode identity alone is not enough to
+        // decide how a row behaves. Use resultIsApplication() for rows.
+        return modeIndex === appsModeIndex;
+    }
+
+    function resultSourceMode(entry, modeIndex) {
+        return favoriteSourceMode(entry, modeIndex);
+    }
+
+    function resultIsApplication(entry, modeIndex) {
+        return resultSourceMode(entry, modeIndex) === appsModeIndex;
+    }
+
+    function resultIsRun(entry, modeIndex) {
+        return resultSourceMode(entry, modeIndex) === runModeIndex;
+    }
+
+    function selectedResultIsApplication() {
+        return resultIsApplication(selectedResult(), selectedModeIndex);
+    }
+
+    function selectedResultIsRun() {
+        return resultIsRun(selectedResult(), selectedModeIndex);
+    }
+
+    function selectedResultSupportsDetail() {
+        return selectedResultIsApplication() || selectedResultIsRun();
+    }
+
+    function selectedControlModeIndex() {
+        const entry = selectedResult();
+
+        if (selectedModeIndex === favoritesModeIndex && entry)
+            return favoriteSourceMode(entry, selectedModeIndex);
+
+        return selectedModeIndex;
+    }
+
+    function resultDisplayName(entry, modeIndex) {
+        if (!entry)
+            return "";
+
+        if (resultIsApplication(entry, modeIndex))
+            return entry.name || "APPLICATION";
+
+        return entry.label || entry.name || "OPTION";
+    }
+
+    function favoriteSourceMode(entry, modeIndex) {
+        if (entry && entry._favoriteRecord)
+            return entry._sourceModeIndex;
+
+        return modeIndex;
+    }
+
+    function favoriteSourceItem(entry) {
+        if (entry && entry._favoriteRecord)
+            return entry._sourceItem;
+
+        return entry;
+    }
+
+    function favoriteKeyFor(entry, modeIndex) {
+        if (!entry)
+            return "";
+
+        if (entry._favoriteRecord && entry._favoriteKey)
+            return entry._favoriteKey;
+
+        if (modeIndex === appsModeIndex)
+            return appEntryKey(entry);
+
+        if (modeIndex === runModeIndex)
+            return runFavoriteKey(
+                runCommandText(entry),
+                runPrefixModeForEntry(entry)
+            );
+
+        // WINDOWS/KILL are still placeholders. Include the mode index so
+        // identical temporary labels remain distinct until those modes get
+        // their real stable identities.
+        const label = String(entry.label || entry.name || "");
+
+        if (!label)
+            return "";
+
+        return "mode:" + modeIndex + ":" + label;
+    }
+
+    function isFavoriteItem(entry, modeIndex) {
+        const key = favoriteKeyFor(entry, modeIndex);
+
+        if (!key)
+            return false;
+
+        return favoriteStore.favoriteKeys.indexOf(key) !== -1;
+    }
+
+    // Kept as a small compatibility helper for app sorting.
+    function isFavorite(entry) {
+        return isFavoriteItem(entry, appsModeIndex);
+    }
+
+    function favoriteRecordForApp(entry) {
+        const key = favoriteKeyFor(entry, appsModeIndex);
+
+        return {
+            _favoriteRecord: true,
+            _favoriteType: "app",
+            _favoriteKey: key,
+            _sourceModeIndex: appsModeIndex,
+            _sourceItem: entry,
+
+            id: entry.id || key,
+            name: entry.name || "APPLICATION",
+            genericName: entry.genericName || "",
+            comment: entry.comment || "",
+            keywords: entry.keywords || "",
+            icon: entry.icon || "",
+            actions: entry.actions || [],
+            command: entry.command || [],
+            startupClass: entry.startupClass || "",
+
+            execute: function() {
+                entry.execute();
+            }
+        };
+    }
+
+    function favoriteRecordForRunCommand(command, prefixMode) {
+        const resolvedPrefix = prefixMode === runPrefixKitty
+                               ? runPrefixKitty
+                               : runPrefixNormal;
+        const sourceItem =
+            runRecord(command, "FAVORITE", resolvedPrefix);
+        const key = runFavoriteKey(command, resolvedPrefix);
+
+        return {
+            _favoriteRecord: true,
+            _favoriteType: "run",
+            _favoriteKey: key,
+            _sourceModeIndex: runModeIndex,
+            _sourceItem: sourceItem,
+            _runPrefixMode: resolvedPrefix,
+
+            id: key,
+            label: sourceItem.label,
+            name: sourceItem.name,
+            commandText: sourceItem.commandText,
+            genericName: sourceItem.genericName,
+            comment: "FAVORITE • "
+                     + runPrefixName(resolvedPrefix)
+                     + " • "
+                     + runShellName().toUpperCase(),
+            keywords: "",
+            icon: "",
+            actions: [],
+            startupClass: ""
+        };
+    }
+
+    function favoriteRecordForModeItem(entry, modeIndex) {
+        const key = favoriteKeyFor(entry, modeIndex);
+        const modeName = modes[modeIndex]
+                         ? modes[modeIndex].name
+                         : "MODE";
+        const label = entry.label || entry.name || "OPTION";
+
+        return {
+            _favoriteRecord: true,
+            _favoriteType: "mode",
+            _favoriteKey: key,
+            _sourceModeIndex: modeIndex,
+            _sourceItem: entry,
+
+            id: key,
+            name: label,
+            genericName: modeName,
+            comment: "FAVORITE FROM " + modeName,
+            keywords: "",
+            icon: "",
+            actions: [],
+            command: [],
+            startupClass: "",
+
+            execute: function() {
+                console.log("AppControl:", modeName, label);
+            }
+        };
+    }
+
+    function currentApplicationValues() {
+        return selectedModeIndex === appsModeIndex
+               ? filteredApps.values
+               : [];
+    }
+
+    function restoreSelectionByKey(key) {
+        let values = [];
+
+        if (selectedModeIndex === favoritesModeIndex)
+            values = favoriteResults.values;
+        else if (selectedModeIndex === appsModeIndex)
+            values = filteredApps.values;
+        else if (selectedModeIndex === runModeIndex)
+            values = runResults.values;
+        else
+            values = placeholderResults;
+
+        if (values.length === 0) {
+            selectedResultIndex = -1;
+            return;
+        }
+
+        let targetIndex = -1;
+
+        for (let i = 0; i < values.length; i++) {
+            const candidateKey = favoriteKeyFor(
+                values[i],
+                selectedModeIndex
+            );
+
+            if (candidateKey === key) {
+                targetIndex = i;
+                break;
+            }
+        }
+
+        if (targetIndex < 0)
+            targetIndex = Math.min(
+                Math.max(0, selectedResultIndex),
+                values.length - 1
+            );
+
+        selectedResultIndex = targetIndex;
+        hoveredResultIndex = -1;
+
+        Qt.callLater(function() {
+            if (selectedResultIndex >= 0)
+                resultList.positionViewAtIndex(
+                    selectedResultIndex,
+                    ListView.Contain
+                );
+        });
+    }
+
+    function toggleFavorite(entry, modeIndex) {
+        if (!entry)
+            return;
+
+        const key = favoriteKeyFor(entry, modeIndex);
+
+        if (!key)
+            return;
+
+        const next = favoriteStore.favoriteKeys.slice();
+        const existingIndex = next.indexOf(key);
+
+        if (existingIndex >= 0)
+            next.splice(existingIndex, 1);
+        else
+            next.unshift(key);
+
+        favoriteStore.favoriteKeys = next;
+
+        // APPS still remembers the desktop entry across mode changes.
+        if (favoriteSourceMode(entry, modeIndex) === appsModeIndex)
+            rememberedAppKey = appEntryKey(favoriteSourceItem(entry));
+
+        Qt.callLater(function() {
+            appControlWindow.restoreSelectionByKey(key);
+            appControlWindow.resetDetailActionSelection();
+        });
+    }
+
+    // ============================================================
+    // REAL APPLICATION MODEL
+    // ============================================================
+
+    ScriptModel {
+        id: filteredApps
+
+        values: {
+            const query = searchInput.text.trim().toLowerCase();
+
+            const apps = [...DesktopEntries.applications.values];
+
+            const filtered = apps.filter(function (entry) {
+                if (query.length === 0)
+                    return true;
+
+                const haystack =
+                    ((entry.name || "") + " "
+                     + (entry.genericName || "") + " "
+                     + (entry.comment || "") + " "
+                     + (entry.keywords || "")).toLowerCase();
+
+                return haystack.indexOf(query) !== -1;
+            });
+
+            // Favorites stay pinned at the top, while each group remains
+            // alphabetized.
+            filtered.sort(function (a, b) {
+                const aFavorite = appControlWindow.isFavorite(a);
+                const bFavorite = appControlWindow.isFavorite(b);
+
+                if (aFavorite !== bFavorite)
+                    return aFavorite ? -1 : 1;
+
+                return (a.name || "").localeCompare(b.name || "");
+            });
+
+            return filtered;
+        }
+    }
+
+    ScriptModel {
+        id: runResults
+
+        values: {
+            const queryRaw = searchInput.text.trim();
+            const query = queryRaw.toLowerCase();
+            const rows = [];
+            const seen = {};
+
+            function addCommand(command, origin, prefixMode) {
+                const normalized = String(command || "").trim();
+                const resolvedPrefix =
+                    prefixMode === appControlWindow.runPrefixKitty
+                    ? appControlWindow.runPrefixKitty
+                    : appControlWindow.runPrefixNormal;
+
+                if (!normalized)
+                    return;
+
+                const dedupeKey =
+                    String(resolvedPrefix) + "\u0000" + normalized;
+
+                if (seen[dedupeKey])
+                    return;
+
+                if (query.length > 0
+                        && normalized.toLowerCase().indexOf(query) === -1
+                        && normalized !== queryRaw)
+                    return;
+
+                seen[dedupeKey] = true;
+                rows.push(
+                    appControlWindow.runRecord(
+                        normalized,
+                        origin,
+                        resolvedPrefix
+                    )
+                );
+            }
+
+            // ----------------------------------------------------
+            // ALL
+            // ----------------------------------------------------
+            //
+            // A separate Rofi-run-style command catalog. Nothing from this
+            // giant list is injected into USER/history mode.
+            if (appControlWindow.runListMode
+                    === appControlWindow.runListAll) {
+                for (let i = 0;
+                     i < appControlWindow.runAllCommands.length;
+                     i++) {
+                    addCommand(
+                        appControlWindow.runAllCommands[i],
+                        "SYSTEM",
+                        appControlWindow.runPrefixMode
+                    );
+                }
+
+                // SYSTEM mirrors APPS favorite sorting: starred commands
+                // pin to the top immediately; both groups stay alphabetic.
+                //
+                // Reading favoriteKeys here creates a direct ScriptModel
+                // dependency so clicking a star causes the list to reorder.
+                const favoriteKeys = favoriteStore.favoriteKeys;
+
+                rows.sort(function(a, b) {
+                    const aKey = appControlWindow.favoriteKeyFor(
+                        a,
+                        appControlWindow.runModeIndex
+                    );
+                    const bKey = appControlWindow.favoriteKeyFor(
+                        b,
+                        appControlWindow.runModeIndex
+                    );
+
+                    const aFavorite =
+                        favoriteKeys.indexOf(aKey) !== -1;
+                    const bFavorite =
+                        favoriteKeys.indexOf(bKey) !== -1;
+
+                    if (aFavorite !== bFavorite)
+                        return aFavorite ? -1 : 1;
+
+                    return String(a.name || a.label || "")
+                        .localeCompare(
+                            String(b.name || b.label || "")
+                        );
+                });
+
+                return rows;
+            }
+
+            // ----------------------------------------------------
+            // TERMINAL
+            // ----------------------------------------------------
+            //
+            // Real shell history, newest first. addCommand() de-duplicates
+            // repeated commands while preserving the newest occurrence.
+            if (appControlWindow.runListMode
+                    === appControlWindow.runListTerminal) {
+                for (let i = 0;
+                     i < appControlWindow.runTerminalHistory.length;
+                     i++) {
+                    addCommand(
+                        appControlWindow.runTerminalHistory[i],
+                        "TERMINAL",
+                        appControlWindow.runPrefixMode
+                    );
+                }
+
+                return rows;
+            }
+
+            // ----------------------------------------------------
+            // USER / HISTORY
+            // ----------------------------------------------------
+
+            // The exact typed command is always first and takes the prefix
+            // currently selected in the bottom RUN prefix selector.
+            if (queryRaw.length > 0) {
+                addCommand(
+                    queryRaw,
+                    "INPUT",
+                    appControlWindow.runPrefixMode
+                );
+            }
+
+            // Saved RUN favorites stay above ordinary history and preserve
+            // whether they were saved as NORMAL or KITTY.
+            for (let i = 0; i < favoriteStore.favoriteKeys.length; i++) {
+                const favoriteData =
+                    appControlWindow.runFavoriteDataFromKey(
+                        favoriteStore.favoriteKeys[i]
+                    );
+
+                if (favoriteData) {
+                    addCommand(
+                        favoriteData.commandText,
+                        "FAVORITE",
+                        favoriteData.prefixMode
+                    );
+                }
+            }
+
+            // Most-recent command history follows and also preserves prefix.
+            for (let i = 0; i < appControlWindow.runHistory.length; i++) {
+                const historyEntry = appControlWindow.runHistory[i];
+
+                if (typeof historyEntry === "object") {
+                    addCommand(
+                        historyEntry.commandText,
+                        "HISTORY",
+                        historyEntry.prefixMode
+                    );
+                } else {
+                    // Compatibility with an already-running older instance.
+                    addCommand(
+                        historyEntry,
+                        "HISTORY",
+                        appControlWindow.runPrefixNormal
+                    );
+                }
+            }
+
+            return rows;
+        }
+    }
+
+    ScriptModel {
+        id: favoriteResults
+
+        values: {
+            const query = searchInput.text.trim().toLowerCase();
+            const rows = [];
+
+            // Real application favorites.
+            const apps = [...DesktopEntries.applications.values];
+
+            for (let i = 0; i < apps.length; i++) {
+                const entry = apps[i];
+
+                if (appControlWindow.isFavoriteItem(
+                            entry,
+                            appControlWindow.appsModeIndex)) {
+                    rows.push(
+                        appControlWindow.favoriteRecordForApp(entry)
+                    );
+                }
+            }
+
+            // Real RUN favorites are self-contained in their favorite key,
+            // so they can be reconstructed even if the command has never
+            // appeared in this session's history.
+            for (let i = 0; i < favoriteStore.favoriteKeys.length; i++) {
+                const favoriteData =
+                    appControlWindow.runFavoriteDataFromKey(
+                        favoriteStore.favoriteKeys[i]
+                    );
+
+                if (favoriteData) {
+                    rows.push(
+                        appControlWindow.favoriteRecordForRunCommand(
+                            favoriteData.commandText,
+                            favoriteData.prefixMode
+                        )
+                    );
+                }
+            }
+
+            // WINDOWS/KILL still use temporary placeholder rows for now.
+            const otherModes = [
+                appControlWindow.windowsModeIndex,
+                appControlWindow.killModeIndex
+            ];
+
+            for (let m = 0; m < otherModes.length; m++) {
+                const modeIndex = otherModes[m];
+
+                for (let i = 0; i < placeholderResults.length; i++) {
+                    const entry = placeholderResults[i];
+
+                    if (appControlWindow.isFavoriteItem(entry, modeIndex)) {
+                        rows.push(
+                            appControlWindow.favoriteRecordForModeItem(
+                                entry,
+                                modeIndex
+                            )
+                        );
+                    }
+                }
+            }
+
+            const visibleRows = rows.filter(function (entry) {
+                if (query.length === 0)
+                    return true;
+
+                const haystack =
+                    ((entry.name || "") + " "
+                     + (entry.genericName || "") + " "
+                     + (entry.comment || "")).toLowerCase();
+
+                return haystack.indexOf(query) !== -1;
+            });
+
+            visibleRows.sort(function (a, b) {
+                const modeCompare =
+                    a._sourceModeIndex - b._sourceModeIndex;
+
+                if (modeCompare !== 0)
+                    return modeCompare;
+
+                return (a.name || "").localeCompare(b.name || "");
+            });
+
+            return visibleRows;
+        }
+    }
+
+    function resultCount() {
+        if (selectedModeIndex === favoritesModeIndex)
+            return favoriteResults.values.length;
+
+        if (selectedModeIndex === appsModeIndex)
+            return filteredApps.values.length;
+
+        if (selectedModeIndex === runModeIndex)
+            return runResults.values.length;
+
+        return placeholderResults.length;
+    }
+
+    function selectedResult() {
+        if (selectedResultIndex < 0 || selectedResultIndex >= resultCount())
+            return null;
+
+        if (selectedModeIndex === favoritesModeIndex)
+            return favoriteResults.values[selectedResultIndex];
+
+        if (selectedModeIndex === appsModeIndex)
+            return filteredApps.values[selectedResultIndex];
+
+        if (selectedModeIndex === runModeIndex)
+            return runResults.values[selectedResultIndex];
+
+        return placeholderResults[selectedResultIndex];
+    }
+
+    function resetResultSelection() {
+        selectedResultIndex = resultCount() > 0 ? 0 : -1;
+
+        if (selectedResultIndex >= 0)
+            resultList.positionViewAtIndex(selectedResultIndex, ListView.Beginning);
+
+        scheduleRunKillProbe();
+    }
+
+
+    function appEntryKey(entry) {
+        if (!entry)
+            return "";
+
+        if (entry.id)
+            return String(entry.id);
+
+        return String(entry.name || "");
+    }
+
+    function rememberCurrentAppSelection() {
+        if (!selectedResultIsApplication())
+            return;
+
+        const entry = selectedResult();
+
+        if (entry)
+            rememberedAppKey = appEntryKey(entry);
+    }
+
+    function restoreRememberedAppSelection() {
+        const apps = currentApplicationValues();
+
+        if (apps.length === 0) {
+            selectedResultIndex = -1;
+            return;
+        }
+
+        let restoredIndex = -1;
+
+        if (rememberedAppKey.length > 0) {
+            for (let i = 0; i < apps.length; i++) {
+                if (appEntryKey(apps[i]) === rememberedAppKey) {
+                    restoredIndex = i;
+                    break;
+                }
+            }
+        }
+
+        if (restoredIndex < 0)
+            restoredIndex = 0;
+
+        selectedResultIndex = restoredIndex;
+
+        Qt.callLater(function () {
+            resultList.positionViewAtIndex(
+                appControlWindow.selectedResultIndex,
+                ListView.Center
+            );
+        });
+    }
+
+    function switchMode(newModeIndex, preservePane) {
+        const wasDetailFocused = detailFocused;
+
+        hoveredResultIndex = -1;
+
+        saveInputForMode(selectedModeIndex);
+
+        if (selectedResultIsApplication())
+            rememberCurrentAppSelection();
+
+        selectedModeIndex = newModeIndex;
+        restoreInputForMode(selectedModeIndex);
+
+        if (selectedModeIndex === appsModeIndex)
+            restoreRememberedAppSelection();
+        else
+            resetResultSelection();
+
+        detailFocused =
+            preservePane
+            && selectedResultSupportsDetail()
+            ? wasDetailFocused
+            : false;
+
+        resetDetailActionSelection();
+    }
+
+    function moveResultSelection(direction) {
+        keyboardActive = true;
+        hoveredResultIndex = -1;
+
+        // Use the ListView's actual count. This avoids model/count timing
+        // mismatches and gives keyboard navigation one authoritative source.
+        const count = resultList.count;
+
+        if (count <= 0) {
+            selectedResultIndex = -1;
+            return;
+        }
+
+        let next = selectedResultIndex;
+
+        if (next < 0 || next >= count)
+            next = direction > 0 ? 0 : count - 1;
+        else
+            next += direction;
+
+        let wrappedToTop = false;
+        let wrappedToBottom = false;
+
+        if (next < 0) {
+            next = count - 1;
+            wrappedToBottom = true;
+        } else if (next >= count) {
+            next = 0;
+            wrappedToTop = true;
+        }
+
+        selectedResultIndex = next;
+
+        if (selectedResultIsApplication())
+            rememberCurrentAppSelection();
+
+        // Keep ordinary movement stable: only scroll when the selected
+        // delegate would leave the visible viewport. Wrapping still jumps
+        // explicitly to the opposite edge.
+        if (wrappedToTop)
+            resultList.positionViewAtIndex(next, ListView.Beginning);
+        else if (wrappedToBottom)
+            resultList.positionViewAtIndex(next, ListView.End);
+        else
+            resultList.positionViewAtIndex(next, ListView.Contain);
+    }
+
+
+    function detailActionCount() {
+        const entry = selectedResult();
+
+        if (!entry)
+            return 0;
+
+        if (selectedResultIsRun())
+            return 5;
+
+        if (!selectedResultIsApplication())
+            return 0;
+
+        return 1 + entry.actions.length;
+    }
+
+    function resetDetailActionSelection() {
+        selectedDetailActionIndex = detailActionCount() > 0 ? 0 : -1;
+
+        if (detailFocused && selectedResultSupportsDetail())
+            detailFlickable.contentY = 0;
+
+        ensureDetailActionVisible();
+    }
+
+    function detailActionItem(actionIndex) {
+        if (selectedResultIsRun()) {
+            if (actionIndex === 0)
+                return runAction;
+
+            if (actionIndex === 1)
+                return runKittyAction;
+
+            if (actionIndex === 2)
+                return runFloatAction;
+
+            if (actionIndex === 3)
+                return runFullscreenAction;
+
+            if (actionIndex === 4)
+                return runKillAction;
+
+            return null;
+        }
+
+        if (!selectedResultIsApplication())
+            return null;
+
+        if (actionIndex === 0)
+            return launchAction;
+
+        const desktopIndex = actionIndex - 1;
+
+        if (desktopIndex < 0)
+            return null;
+
+        return desktopActionsRepeater.itemAt(desktopIndex);
+    }
+
+    function ensureDetailActionVisible() {
+        if (!detailFocused || !selectedResultSupportsDetail())
+            return;
+
+        Qt.callLater(function () {
+            const item = detailActionItem(selectedDetailActionIndex);
+
+            if (!item || detailFlickable.height <= 0)
+                return;
+
+            const point = item.mapToItem(detailContent, 0, 0);
+            const margin = 8;
+
+            const itemTop = point.y - margin;
+            const itemBottom = point.y + item.height + margin;
+
+            let targetY = detailFlickable.contentY;
+
+            if (itemTop < targetY)
+                targetY = itemTop;
+            else if (itemBottom > targetY + detailFlickable.height)
+                targetY = itemBottom - detailFlickable.height;
+
+            const maxY = Math.max(
+                0,
+                detailFlickable.contentHeight - detailFlickable.height
+            );
+
+            detailFlickable.contentY = Math.max(
+                0,
+                Math.min(maxY, targetY)
+            );
+        });
+    }
+
+    function activateResult(entry, modeIndex) {
+        if (!entry)
+            return;
+
+        const sourceMode = resultSourceMode(entry, modeIndex);
+        const sourceItem = favoriteSourceItem(entry);
+
+        if (sourceMode === appsModeIndex) {
+            const appEntry = sourceItem || entry;
+
+            console.log("AppControl: launching", appEntry.name);
+            appEntry.execute();
+            menuOpen = false;
+            return;
+        }
+
+        if (sourceMode === runModeIndex) {
+            const runEntry = sourceItem || entry;
+
+            const prefixMode =
+                modeIndex === runModeIndex
+                ? runPrefixMode
+                : runPrefixModeForEntry(runEntry);
+
+            executeRunCommand(
+                runCommandText(runEntry),
+                prefixMode
+            );
+            return;
+        }
+
+        // WINDOWS and KILL will get their real dispatchers when those modes
+        // are implemented. Keeping this branch explicit prevents a FAVORITES
+        // row from accidentally being treated like an application.
+        console.log(
+            "AppControl:",
+            modes[sourceMode] ? modes[sourceMode].name : "MODE",
+            resultDisplayName(sourceItem || entry, sourceMode)
+        );
+    }
+
+    function activateSelectedDetailAction() {
+        const entry = selectedResult();
+
+        if (!entry)
+            return;
+
+        if (selectedResultIsRun()) {
+            const runEntry = favoriteSourceItem(entry) || entry;
+            const command = runCommandText(runEntry);
+
+            // Primary action respects the prefix stored on the selected
+            // result. Alternate KITTY action always forces Kitty regardless
+            // of the top/bottom selector state or how the favorite was saved.
+            if (selectedDetailActionIndex === 1) {
+                executeRunCommand(command, runPrefixKitty);
+                return;
+            }
+
+            if (selectedDetailActionIndex === 2) {
+                executeRunFloatCommand(command);
+                return;
+            }
+
+            if (selectedDetailActionIndex === 3) {
+                executeRunFullscreenCommand(command);
+                return;
+            }
+
+            if (selectedDetailActionIndex === 4) {
+                if (runKillAvailable)
+                    executeRunKillAction();
+
+                return;
+            }
+
+            // Inside RUN itself, the bottom prefix selector is
+            // authoritative. This fixes USER/history/favorite rows retaining
+            // an older stored prefix after the user switches NORMAL/KITTY.
+            //
+            // When a RUN favorite is activated from FAVORITES, preserve the
+            // prefix that was saved with that favorite.
+            const primaryPrefix =
+                selectedModeIndex === runModeIndex
+                ? runPrefixMode
+                : runPrefixModeForEntry(runEntry);
+
+            executeRunCommand(
+                command,
+                primaryPrefix
+            );
+            return;
+        }
+
+        if (!selectedResultIsApplication())
+            return;
+
+        const appEntry = favoriteSourceItem(entry) || entry;
+
+        if (selectedDetailActionIndex === 0) {
+            console.log("AppControl: launching", appEntry.name);
+            appEntry.execute();
+            menuOpen = false;
+            return;
+        }
+
+        const desktopActionIndex = selectedDetailActionIndex - 1;
+
+        if (desktopActionIndex < 0
+                || desktopActionIndex >= appEntry.actions.length)
+            return;
+
+        const action = appEntry.actions[desktopActionIndex];
+
+        console.log("AppControl: desktop action", action.name);
+        action.execute();
+        menuOpen = false;
+    }
+
+
+    // ============================================================
+    // OPTIONAL PER-APP PRESENTATION OVERRIDES
+    // ============================================================
+    //
+    // Add entries here later when you want AppControlW to present an
+    // application differently from its .desktop metadata.
+    //
+    // Example:
+    //
+    // "Firefox": {
+    //     name: "FIREFOX",
+    //     description: "WEB / RESEARCH",
+    //     icon: "/absolute/path/to/custom-firefox.svg"
+    // }
+    //
+    // Any field you leave out falls back to the real desktop entry.
+    property var appOverrides: ({})
+    property var iconGlowCache: ({})
+
+    function cachedIconGlow(source) {
+        const key = source ? source.toString() : "";
+
+        if (!key || iconGlowCache[key] === undefined)
+            return null;
+
+        return iconGlowCache[key];
+    }
+
+    function rememberIconGlow(source, color, forceOverwrite) {
+        const key = source ? source.toString() : "";
+
+        if (!key)
+            return;
+
+        if (!forceOverwrite && iconGlowCache[key] !== undefined)
+            return;
+
+        // Reassign the object so QML bindings depending on iconGlowCache
+        // are notified. Mutating iconGlowCache[key] in place did not
+        // reliably update the other copy of the same app icon.
+        const nextCache = Object.assign({}, iconGlowCache);
+        nextCache[key] = color;
+        iconGlowCache = nextCache;
+    }
+
+    function appOverride(entry) {
+        if (!entry || !entry.name)
+            return null;
+
+        return appOverrides[entry.name] || null;
+    }
+
+    function appDisplayName(entry) {
+        if (!entry)
+            return "NO SELECTION";
+
+        const override = appOverride(entry);
+
+        return override && override.name
+            ? override.name
+            : (entry.name || "APPLICATION");
+    }
+
+    function appDisplayDescription(entry) {
+        if (!entry)
+            return "";
+
+        const override = appOverride(entry);
+
+        if (override && override.description)
+            return override.description;
+
+        return entry.genericName || entry.comment || "APPLICATION";
+    }
+
+    function appLongDescription(entry) {
+        if (!entry)
+            return "";
+
+        const override = appOverride(entry);
+
+        if (override && override.longDescription)
+            return override.longDescription;
+
+        return entry.comment || "";
+    }
+
+    function appDisplayIcon(entry) {
+        if (!entry)
+            return "";
+
+        const override = appOverride(entry);
+
+        return override && override.icon
+            ? override.icon
+            : (entry.icon || "");
+    }
+
+    function appIconSource(entry) {
+        const icon = appDisplayIcon(entry);
+
+        if (!icon)
+            return "";
+
+        if (icon.indexOf("/") === 0 || icon.indexOf("file:") === 0)
+            return icon;
+
+        return Quickshell.iconPath(icon, true);
+    }
+
+    function safeActionIconSource(icon) {
+        if (!icon)
+            return "";
+
+        if (icon.indexOf("/") === 0 || icon.indexOf("file:") === 0)
+            return icon;
+
+        return Quickshell.iconPath(icon, true);
+    }
+
+
+    function classifyIconGlow(pixelData) {
+        if (!pixelData || pixelData.length < 4)
+            return Colors.orange;
+
+        // Prefer a real chromatic accent over neutral white/black mass.
+        // This matters for icons such as Calendar (mostly white with a
+        // purple header) and Mullvad (dark blue field + yellow M).
+        let redAccent = 0;
+        let orangeAccent = 0;
+        let magentaAccent = 0;
+        let cyanAccent = 0;
+        let greenAccent = 0;
+
+        let totalVisibleWeight = 0;
+        let totalAccentWeight = 0;
+
+        let lightNeutralWeight = 0;
+        let darkNeutralWeight = 0;
+        let midNeutralWeight = 0;
+
+        for (let i = 0; i < pixelData.length; i += 4) {
+            const alpha = pixelData[i + 3] / 255.0;
+
+            if (alpha < 0.12)
+                continue;
+
+            const r = pixelData[i] / 255.0;
+            const g = pixelData[i + 1] / 255.0;
+            const b = pixelData[i + 2] / 255.0;
+
+            const maxValue = Math.max(r, g, b);
+            const minValue = Math.min(r, g, b);
+            const delta = maxValue - minValue;
+
+            const saturation = maxValue <= 0.0001
+                               ? 0.0
+                               : delta / maxValue;
+
+            totalVisibleWeight += alpha;
+
+            // IMPORTANT: classify saturated dark colors by hue BEFORE
+            // treating them as "black". A dark navy background is still
+            // blue, not neutral black.
+            if (saturation >= 0.18 && delta >= 0.035) {
+                let hue = 0.0;
+
+                if (maxValue === r) {
+                    hue = 60.0 * (((g - b) / delta) % 6.0);
+                } else if (maxValue === g) {
+                    hue = 60.0 * (((b - r) / delta) + 2.0);
+                } else {
+                    hue = 60.0 * (((r - g) / delta) + 4.0);
+                }
+
+                if (hue < 0.0)
+                    hue += 360.0;
+
+                // Strongly favor saturated accent pixels. Bright colors
+                // get a slight boost, but dark saturated colors still count.
+                const accentWeight =
+                    alpha
+                    * (0.55 + saturation * 1.45)
+                    * (0.65 + maxValue * 0.35);
+
+                totalAccentWeight += accentWeight;
+
+                // Red gets its own family now.
+                if (hue < 15.0 || hue >= 345.0) {
+                    redAccent += accentWeight;
+                // Orange / yellow.
+                } else if (hue < 75.0) {
+                    orangeAccent += accentWeight;
+                // Green.
+                } else if (hue < 170.0) {
+                    greenAccent += accentWeight;
+                // Cyan / blue. Keep this range narrower so indigo/violet
+                // icons such as Obsidian land in magenta instead of cyan.
+                } else if (hue < 245.0) {
+                    cyanAccent += accentWeight;
+                // Indigo / purple / pink.
+                } else {
+                    magentaAccent += accentWeight;
+                }
+
+                continue;
+            }
+
+            // Only genuinely low-saturation pixels reach this fallback.
+            if (maxValue > 0.72) {
+                lightNeutralWeight += alpha;
+            } else if (maxValue < 0.26) {
+                darkNeutralWeight += alpha;
+            } else {
+                midNeutralWeight += alpha;
+            }
+        }
+
+        // A relatively small colored region should be allowed to define
+        // the glow. ~4% is enough for a colored header/mark to beat a
+        // mostly white or black icon body.
+        const accentPresence =
+            totalVisibleWeight > 0.0
+            ? totalAccentWeight / totalVisibleWeight
+            : 0.0;
+
+        if (accentPresence >= 0.04) {
+            const bestAccent = Math.max(
+                redAccent,
+                orangeAccent,
+                magentaAccent,
+                cyanAccent,
+                greenAccent
+            );
+
+            if (bestAccent === redAccent)
+                return Colors.red;
+
+            if (bestAccent === greenAccent)
+                return Colors.omnitrix;
+
+            if (bestAccent === cyanAccent)
+                return Colors.cyan;
+
+            if (bestAccent === magentaAccent)
+                return Colors.magenta;
+
+            return Colors.orange;
+        }
+
+        // Monochrome fallback:
+        // bright/white icons -> white text/icon accent with cyan glow
+        // gray, charcoal and black icons -> magenta.
+        if (lightNeutralWeight > darkNeutralWeight
+                && lightNeutralWeight > midNeutralWeight)
+            return Colors.white;
+
+        return Colors.magenta;
+    }
+
+
+    // ============================================================
+    // SWAY WINDOW STATE
+    // ============================================================
+
+    function normalizeAppToken(value) {
+        if (!value)
+            return "";
+
+        let token = String(value).toLowerCase();
+
+        if (token.endsWith(".desktop"))
+            token = token.slice(0, -8);
+
+        return token.replace(/[^a-z0-9]/g, "");
+    }
+
+    function commandBaseName(entry) {
+        if (!entry || !entry.command || entry.command.length === 0)
+            return "";
+
+        const command = String(entry.command[0]);
+        const parts = command.split("/");
+
+        return parts[parts.length - 1];
+    }
+
+    function appMatchTokens(entry) {
+        if (!entry)
+            return [];
+
+        const rawTokens = [
+            entry.startupClass || "",
+            entry.id || "",
+            entry.name || "",
+            commandBaseName(entry)
+        ];
+
+        // Reverse-DNS desktop ids often end in the useful app identifier.
+        if (entry.id) {
+            const idWithoutDesktop = String(entry.id).replace(/\.desktop$/i, "");
+            const idParts = idWithoutDesktop.split(".");
+
+            if (idParts.length > 1)
+                rawTokens.push(idParts[idParts.length - 1]);
+        }
+
+        const tokens = [];
+
+        for (let i = 0; i < rawTokens.length; i++) {
+            const normalized = normalizeAppToken(rawTokens[i]);
+
+            if (normalized.length > 0 && tokens.indexOf(normalized) === -1)
+                tokens.push(normalized);
+        }
+
+        return tokens;
+    }
+
+    function windowMatchTokens(windowInfo) {
+        if (!windowInfo)
+            return [];
+
+        const rawTokens = [
+            windowInfo.appId || "",
+            windowInfo.className || "",
+            windowInfo.instance || ""
+        ];
+
+        const tokens = [];
+
+        for (let i = 0; i < rawTokens.length; i++) {
+            const normalized = normalizeAppToken(rawTokens[i]);
+
+            if (normalized.length > 0 && tokens.indexOf(normalized) === -1)
+                tokens.push(normalized);
+        }
+
+        return tokens;
+    }
+
+    function tokensMatch(appToken, windowToken) {
+        if (!appToken || !windowToken)
+            return false;
+
+        if (appToken === windowToken)
+            return true;
+
+        // Helps with reverse-DNS ids such as org.mozilla.firefox vs firefox,
+        // while avoiding very short accidental matches.
+        const shorterLength = Math.min(appToken.length, windowToken.length);
+
+        if (shorterLength < 4)
+            return false;
+
+        return appToken.endsWith(windowToken)
+                || windowToken.endsWith(appToken);
+    }
+
+    function windowMatchesApp(windowInfo, entry) {
+        const appTokens = appMatchTokens(entry);
+        const windowTokens = windowMatchTokens(windowInfo);
+
+        for (let i = 0; i < appTokens.length; i++) {
+            for (let j = 0; j < windowTokens.length; j++) {
+                if (tokensMatch(appTokens[i], windowTokens[j]))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    function windowsForApp(entry) {
+        if (!entry)
+            return [];
+
+        return swayWindows.filter(function (windowInfo) {
+            return windowMatchesApp(windowInfo, entry);
+        });
+    }
+
+    function workspaceSummary(windows) {
+        return workspaceList(windows).join(", ");
+    }
+
+    function workspaceList(windows) {
+        if (!windows || windows.length === 0)
+            return [];
+
+        const names = [];
+
+        for (let i = 0; i < windows.length; i++) {
+            const workspace = windows[i].workspace || "";
+
+            if (workspace.length > 0 && names.indexOf(workspace) === -1)
+                names.push(workspace);
+        }
+
+        return names;
+    }
+
+    function collectSwayWindows(node, currentWorkspace, output) {
+        if (!node)
+            return;
+
+        let workspace = currentWorkspace || "";
+
+        if (node.type === "workspace")
+            workspace = node.name || workspace;
+
+        const properties = node.window_properties || {};
+        const appId = node.app_id || "";
+        const className = properties.class || "";
+        const instance = properties.instance || "";
+
+        // A leaf/container with application identity is a window we care about.
+        if (node.type === "con" && (appId || className || instance)) {
+            output.push({
+                id: node.id || 0,
+                name: node.name || "",
+                appId: appId,
+                className: className,
+                instance: instance,
+                pid: node.pid || 0,
+                focused: !!node.focused,
+                workspace: workspace
+            });
+        }
+
+        const children = node.nodes || [];
+
+        for (let i = 0; i < children.length; i++)
+            collectSwayWindows(children[i], workspace, output);
+
+        const floatingChildren = node.floating_nodes || [];
+
+        for (let i = 0; i < floatingChildren.length; i++)
+            collectSwayWindows(floatingChildren[i], workspace, output);
+    }
+
+    function consumeSwayTree(rawText) {
+        if (!rawText || rawText.trim().length === 0)
+            return;
+
+        try {
+            const tree = JSON.parse(rawText);
+            const windows = [];
+
+            collectSwayWindows(tree, "", windows);
+
+            swayWindows = windows;
+            windowDataReady = true;
+            windowDataError = "";
+
+            console.log("AppControl: Sway window snapshot:", windows.length, "windows");
+        } catch (error) {
+            windowDataReady = false;
+            windowDataError = String(error);
+
+            console.log("AppControl: failed to parse Sway tree:", error);
+        }
+    }
+
+    function refreshWindowState() {
+        swayTreeProcess.exec(["swaymsg", "-t", "get_tree"]);
+    }
+
+    Process {
+        id: swayTreeProcess
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                appControlWindow.consumeSwayTree(text);
+            }
+        }
+
+        stderr: StdioCollector {
+            onStreamFinished: {
+                if (text.trim().length > 0) {
+                    appControlWindow.windowDataError = text.trim();
+                    console.log("AppControl: swaymsg:", text.trim());
+                }
+            }
+        }
+    }
+
+    I3IpcListener {
+        subscriptions: ["window", "workspace"]
+
+        onIpcEvent: function (event) {
+            // Refresh from the authoritative tree after create/close/focus/move/
+            // title/workspace changes rather than trying to reconstruct state
+            // from individual events.
+            appControlWindow.refreshWindowState();
+        }
+    }
+
+    // ============================================================
+    // WINDOW
+    // ============================================================
+
+    implicitWidth: 834
+    implicitHeight: 674
+
+    // Top-right popup placement.
+    // Applauncher is 50px tall with an 8px top offset, so 58px
+    // starts this window directly underneath it.
+    anchors {
+        top: true
+        left: true
+    }
+
+    margins {
+        top: -3
+        left: 2
+    }
+
+    color: "transparent"
+
+    surfaceFormat.opaque: false
+
+    focusable: true
+    visible: menuOpen
+
+    // ============================================================
+    // BACKGROUND / OUTER GLOW
+    // ============================================================
+
+    RectangularShadow {
+        anchors.fill: background
+
+        spread: 6
+        z: -20
+
+        opacity: 0.38
+        color: Colors.orange
+    }
+
+    RectangularShadow {
+        anchors.fill: background
+
+        spread: 12
+        z: -21
+
+        opacity: 0.12
+        color: Colors.orange
+    }
+
+    Rectangle {
+        id: background
+
+        anchors.fill: parent
+        anchors.margins: 12
+
+        // Geometry anchor for the outer border/glow only.
+        // Individual panels provide their own backgrounds.
+        // Keeping this transparent is what allows the right-side
+        // app-control panel alpha to actually show through.
+        color: "transparent"
+        opacity: 1.0
+    }
+
+    // ============================================================
+    // MODE RAIL
+    // ============================================================
+
+    Rectangle {
+        id: modeRail
+
+        width: 110
+
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+
+        anchors.leftMargin: 12
+        anchors.topMargin: 12
+        anchors.bottomMargin: 12
+
+        color: Colors.black
+
+        Column {
+            id: modeColumn
+
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+
+            anchors.topMargin: 20
+
+            spacing: 8
+
+            Repeater {
+                model: appControlWindow.modes
+
+                Rectangle {
+                    id: modeButton
+
+                    property bool isSelected: index === appControlWindow.selectedModeIndex
+
+                    property bool isHovered: !appControlWindow.keyboardActive && modeMouse.containsMouse
+
+                    property bool isPressed: modeMouse.pressed
+
+                    width: parent.width
+                    height: 55
+
+                    color: modeButton.isPressed ? Colors.magenta : modeButton.isHovered ? Colors.yellow : modeButton.isSelected ? Colors.yellow : Colors.black
+
+                    Column {
+                        anchors.centerIn: parent
+
+                        spacing: 2
+
+                        Item {
+                            width: modeSymbol.implicitWidth
+                            height: modeSymbol.implicitHeight
+
+                            anchors.horizontalCenter: parent.horizontalCenter
+
+                            GohuText {
+                                id: modeSymbol
+
+                                anchors.centerIn: parent
+
+                                text:
+                                    index === appControlWindow.favoritesModeIndex
+                                    ? (modeButton.isHovered
+                                       || modeButton.isPressed
+                                       || appControlWindow.favoritesFaceClickPulse
+                                       ? "(˶ˆᗜˆ˵)"
+                                       : appControlWindow.favoritesFaceBlinking
+                                       ? "(˵-ᴗ-˵)"
+                                       : modelData.symbol)
+                                    : modelData.symbol
+
+                                font.pixelSize: 17
+
+                                color: modeButton.isPressed
+                                       ? Colors.black
+                                       : modeButton.isSelected
+                                       ? Colors.magenta
+                                       : modeButton.isHovered
+                                       ? Colors.orange
+                                       : Colors.cyan
+                            }
+
+                            DropShadow {
+                                anchors.fill: modeSymbol
+                                source: modeSymbol
+
+                                horizontalOffset: 0
+                                verticalOffset: 0
+
+                                radius: modeButton.isSelected
+                                        ? 18
+                                        : modeButton.isHovered
+                                        ? 14
+                                        : 10
+
+                                samples: modeButton.isSelected
+                                         ? 17
+                                         : modeButton.isHovered
+                                         ? 9
+                                         : 7
+
+                                z: 2
+
+                                opacity: modeButton.isSelected
+                                         ? 1.0
+                                         : modeButton.isHovered
+                                         ? 0.8
+                                         : 0.42
+
+                                color: modeButton.isSelected
+                                       ? Colors.magenta
+                                       : modeButton.isHovered
+                                       ? Colors.orange
+                                       : Colors.cyan
+
+                                transparentBorder: true
+                            }
+                        }
+
+                        Item {
+                            width: modeLabel.implicitWidth
+                            height: modeLabel.implicitHeight
+
+                            anchors.horizontalCenter: parent.horizontalCenter
+
+                            GohuText {
+                                id: modeLabel
+
+                                anchors.centerIn: parent
+
+                                text: modelData.name
+
+                                font.pixelSize: 11
+
+                                color: modeButton.isPressed
+                                       ? Colors.black
+                                       : modeButton.isHovered
+                                       ? Colors.orange
+                                       : modeButton.isSelected
+                                       ? Colors.orange
+                                       : Colors.white
+                            }
+
+                            DropShadow {
+                                anchors.fill: modeLabel
+                                source: modeLabel
+
+                                horizontalOffset: 0
+                                verticalOffset: 0
+
+                                radius: 5
+                                samples: 7
+
+                                z: 2
+
+                                opacity: !modeButton.isPressed
+                                         && !modeButton.isHovered
+                                         && !modeButton.isSelected
+                                         ? 0.10
+                                         : 0.0
+
+                                color: Colors.white
+                                transparentBorder: true
+                            }
+                        }
+                    }
+
+                    MouseArea {
+                        id: modeMouse
+
+                        anchors.fill: parent
+
+                        hoverEnabled: true
+
+                        onEntered: {
+                            appControlWindow.keyboardActive = false;
+                        }
+
+                        onClicked: {
+                            if (index === appControlWindow.favoritesModeIndex) {
+                                appControlWindow.favoritesFaceClickPulse = true;
+                                favoritesFaceClickPulseTimer.restart();
+                            }
+
+                            appControlWindow.switchMode(index, false);
+
+                            searchInput.forceActiveFocus();
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 3
+                        z: -1
+
+                        // No idle rectangle glow. Inactive glow belongs to
+                        // the glyph and label themselves, not the button box.
+                        opacity: modeButton.isSelected || modeButton.isHovered
+                                 ? 0.5
+                                 : 0.0
+
+                        color: Colors.orange
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 10
+                        z: 1
+
+                        opacity: modeButton.isSelected || modeButton.isHovered
+                                 ? 0.09
+                                 : 0.0
+
+                        color: Colors.orange
+                    }
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // SEARCH / RESULTS PANE
+    // ============================================================
+
+    Rectangle {
+        id: resultsPane
+
+        width: 310
+
+        anchors.left: modeRail.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+
+        anchors.topMargin: 12
+        anchors.bottomMargin: 12
+
+        color: Colors.dark
+
+        // ========================================================
+        // SEARCH HEADER
+        // ========================================================
+
+        Rectangle {
+            id: searchHeader
+
+            width: parent.width
+            height: 70
+
+            anchors.top: parent.top
+
+            color: Colors.black
+
+            // Fixed header geometry: the decorative APPS title has unusual
+            // combining-glyph metrics, so it must not participate in sizing
+            // the search row. Title and input are anchored independently.
+            Item {
+                id: selectorTitleSlot
+
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+
+                anchors.leftMargin: 15
+                anchors.rightMargin: 15
+                anchors.topMargin: 9
+
+                height: 22
+
+                // Ordinary mode title.
+                GohuText {
+                    id: selectorModeHeaderText
+
+                    visible:
+                        appControlWindow.selectedModeIndex
+                        !== appControlWindow.appsModeIndex
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    text: appControlWindow.modes[
+                              appControlWindow.selectedModeIndex
+                          ].name
+
+                    font.pixelSize: 19
+
+                    color: appControlWindow.selectedModeIndex
+                           === appControlWindow.killModeIndex
+                           ? Colors.red
+                           : Colors.cyan
+                }
+
+                DropShadow {
+                    anchors.fill: selectorModeHeaderText
+                    source: selectorModeHeaderText
+
+                    visible: selectorModeHeaderText.visible
+
+                    horizontalOffset: 0
+                    verticalOffset: 0
+
+                    radius: 14
+                    samples: 11
+
+                    z: 2
+
+                    opacity: 0.75
+
+                    color: appControlWindow.selectedModeIndex
+                           === appControlWindow.killModeIndex
+                           ? Colors.red
+                           : Colors.cyan
+
+                    transparentBorder: true
+                }
+
+                // APPS title: keep the words readable, but give the
+                // decorative stars and edge dashes a stronger cyan halo.
+                Row {
+                    id: appsSelectorTitle
+
+                    visible:
+                        appControlWindow.selectedModeIndex
+                        === appControlWindow.appsModeIndex
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    spacing: 0
+
+                    Item {
+                        width: appsTitleLeftDecor.implicitWidth
+                        height: appsTitleLeftDecor.implicitHeight
+
+                        GohuText {
+                            id: appsTitleLeftDecor
+
+                            anchors.centerIn: parent
+
+                            text: "- ༘⋆₊⊹"
+                            font.pixelSize: 16
+                            color: Colors.cyan
+                        }
+
+                        DropShadow {
+                            anchors.fill: appsTitleLeftDecor
+                            source: appsTitleLeftDecor
+
+                            horizontalOffset: 0
+                            verticalOffset: 0
+
+                            radius: 12
+                            samples: 9
+
+                            opacity: 0.88
+                            color: Colors.cyan
+
+                            transparentBorder: true
+                        }
+                    }
+
+                    Item {
+                        width: appsTitleWords.implicitWidth
+                        height: appsTitleWords.implicitHeight
+
+                        GohuText {
+                            id: appsTitleWords
+
+                            anchors.centerIn: parent
+                            anchors.verticalCenterOffset: 4
+
+                            text: "Pick an App any App"
+                            font.pixelSize: 16
+                            color: Colors.cyan
+                        }
+
+                        DropShadow {
+                            anchors.fill: appsTitleWords
+                            source: appsTitleWords
+
+                            horizontalOffset: 0
+                            verticalOffset: 0
+
+                            radius: 8
+                            samples: 7
+
+                            opacity: 0.56
+                            color: Colors.cyan
+
+                            transparentBorder: true
+                        }
+                    }
+
+                    Item {
+                        width: appsTitleRightDecor.implicitWidth
+                        height: appsTitleRightDecor.implicitHeight
+
+                        GohuText {
+                            id: appsTitleRightDecor
+
+                            anchors.centerIn: parent
+
+                            text: " ๋࣭ ⭑⋆｡˚-"
+                            font.pixelSize: 16
+                            color: Colors.cyan
+                        }
+
+                        DropShadow {
+                            anchors.fill: appsTitleRightDecor
+                            source: appsTitleRightDecor
+
+                            horizontalOffset: 0
+                            verticalOffset: 0
+
+                            radius: 12
+                            samples: 9
+
+                            opacity: 0.88
+                            color: Colors.cyan
+
+                            transparentBorder: true
+                        }
+                    }
+                }
+
+                Rectangle {
+                    id: selectorTitleDivider
+
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+
+                    anchors.leftMargin: -15
+                    anchors.rightMargin: -15
+
+                    // Nudge the title underline lower without changing the
+                    // fixed selector/title/input layout.
+                    transform: Translate {
+                        y: 4
+                    }
+
+                    height: 1
+
+                    color: appControlWindow.selectedModeIndex === appControlWindow.killModeIndex
+                           ? Colors.red
+                           : Colors.cyan
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 3
+                        z: -1
+
+                        opacity: 0.38
+                        color: selectorTitleDivider.color
+                    }
+                }
+            }
+
+            TextInput {
+                id: searchInput
+
+                // Fixed to the divider instead of flowing under the title.
+                // Mode/header glyph metrics can no longer move this row.
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+
+                anchors.leftMargin: 15
+                anchors.rightMargin: 15
+                anchors.bottomMargin: 3
+
+                height: 22
+
+                // The decorative cursor should not reserve horizontal
+                // space in the input. These properties only drive the
+                // idle star blink.
+                property bool typingRecently: false
+                property bool cursorStarsVisible: true
+                property int trailingStarPhase: 0
+
+                Timer {
+                    id: typingPauseTimer
+
+                    interval: 500
+                    repeat: false
+
+                    onTriggered: {
+                        searchInput.typingRecently = false;
+                        searchInput.cursorStarsVisible = true;
+                    }
+                }
+
+                Timer {
+                    id: cursorStarsBlinkTimer
+
+                    interval: 420
+                    repeat: true
+                    running: searchInput.activeFocus
+                             && !searchInput.typingRecently
+
+                    onTriggered: {
+                        searchInput.cursorStarsVisible =
+                            !searchInput.cursorStarsVisible;
+                    }
+                }
+
+                Timer {
+                    id: trailingStarWaveTimer
+
+                    interval: 360
+                    repeat: true
+                    running: searchInput.activeFocus
+                             && !searchInput.typingRecently
+
+                    onTriggered: {
+                        searchInput.trailingStarPhase =
+                            (searchInput.trailingStarPhase + 1) % 5;
+                    }
+                }
+
+                font.family: "GohuFont 11 Nerd Font Mono"
+                font.pixelSize: 18
+
+                verticalAlignment: TextInput.AlignVCenter
+
+                color: Colors.magenta
+
+                selectionColor: Colors.yellow
+                selectedTextColor: Colors.black
+
+                // Keep cursor geometry active, but replace the native
+                // insertion bar with a truly invisible zero-width delegate.
+                // The decorative overlay below is the only visible cursor.
+                cursorVisible: activeFocus
+
+                cursorDelegate: Item {
+                    width: 0
+                    height: 0
+                    visible: false
+                    opacity: 0.0
+                }
+
+                clip: true
+
+                layer.enabled: true
+                layer.effect: DropShadow {
+                    horizontalOffset: 0
+                    verticalOffset: 0
+
+                    radius: 7
+                    samples: 9
+
+                    opacity: 0.30
+                    color: Colors.magenta
+
+                    transparentBorder: true
+                }
+
+                Keys.onPressed: function (event) {
+                    appControlWindow.handleKey(event);
+                }
+
+                onTextChanged: {
+                    searchInput.typingRecently = true;
+                    searchInput.cursorStarsVisible = true;
+                    searchInput.trailingStarPhase = 0;
+                    typingPauseTimer.restart();
+
+                    if (appControlWindow.selectedModeIndex
+                            === appControlWindow.appsModeIndex
+                            || appControlWindow.selectedModeIndex
+                            === appControlWindow.favoritesModeIndex
+                            || appControlWindow.selectedModeIndex
+                            === appControlWindow.runModeIndex) {
+                        appControlWindow.resetResultSelection();
+
+                        if (appControlWindow.selectedResultIsApplication())
+                            appControlWindow.rememberCurrentAppSelection();
+
+                        appControlWindow.resetDetailActionSelection();
+                    }
+                }
+            }
+
+            // Decorative search cursor rendered OUTSIDE TextInput.
+            // Using cursorRectangle for x keeps it attached to the real
+            // insertion point, while avoiding TextInput's layer shadow.
+            Item {
+                id: searchCursorOverlay
+
+                visible: searchInput.activeFocus
+
+                // Match the real insertion point instead of trailing behind
+                // it. The native bar itself is suppressed above.
+                x: searchInput.x + searchInput.cursorRectangle.x - 1
+                y: searchInput.y + 3
+
+                width: typingCursorVisual.implicitWidth
+                height: searchInput.height
+
+                z: 50
+
+                Row {
+                    id: typingCursorVisual
+
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    spacing: -2
+
+                    GohuText {
+                        id: typingCursorStars
+
+                        text: "݁˖"
+
+                        font.pixelSize: 17
+                        color: Colors.orange
+
+                        opacity: searchInput.typingRecently
+                                 || searchInput.cursorStarsVisible
+                                 ? 1.0
+                                 : 0.02
+                    }
+
+                    Item {
+                        id: typingCursorHandGroup
+
+                        width: typingCursorHand.implicitWidth
+                        height: typingCursorHand.implicitHeight
+
+                        GohuText {
+                            id: typingCursorHand
+
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: "✍︎"
+
+                            font.pixelSize: 17
+                            color: Colors.orange
+                        }
+
+                        // First decorative mark immediately behind the hand.
+                        // Including the hand in the shaping string prevents
+                        // the mark from becoming a detached/doubled glyph.
+                        GohuText {
+                            id: typingCursorNearStarOne
+
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: "✍︎๋"
+
+                            font.pixelSize: 17
+                            color: Colors.orange
+
+                            opacity: searchInput.typingRecently
+                                     ? 0.60
+                                     : searchInput.trailingStarPhase === 0
+                                     ? 0.68
+                                     : searchInput.trailingStarPhase === 1
+                                     ? 0.36
+                                     : searchInput.trailingStarPhase === 4
+                                     ? 0.22
+                                     : 0.04
+                        }
+
+                        // Second decorative mark follows the first with an
+                        // overlapping phase instead of blinking one-by-one.
+                        GohuText {
+                            id: typingCursorNearStarTwo
+
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: "✍︎࣭"
+
+                            font.pixelSize: 17
+                            color: Colors.orange
+
+                            opacity: searchInput.typingRecently
+                                     ? 0.60
+                                     : searchInput.trailingStarPhase === 0
+                                     ? 0.28
+                                     : searchInput.trailingStarPhase === 1
+                                     ? 0.68
+                                     : searchInput.trailingStarPhase === 2
+                                     ? 0.38
+                                     : 0.04
+                        }
+                    }
+
+                    GohuText {
+                        id: typingCursorTrailStar
+
+                        text: "⭑"
+
+                        font.pixelSize: 17
+                        color: Colors.orange
+
+                        opacity: searchInput.typingRecently
+                                 ? 1.0
+                                 : searchInput.trailingStarPhase === 0
+                                 ? 0.14
+                                 : searchInput.trailingStarPhase === 1
+                                 ? 0.48
+                                 : searchInput.trailingStarPhase === 2
+                                 ? 1.0
+                                 : searchInput.trailingStarPhase === 3
+                                 ? 0.74
+                                 : 0.30
+                    }
+
+                    GohuText {
+                        id: typingCursorTrailPlus
+
+                        text: "₊ "
+
+                        font.pixelSize: 17
+                        color: Colors.orange
+
+                        opacity: searchInput.typingRecently
+                                 ? 1.0
+                                 : searchInput.trailingStarPhase === 0
+                                 ? 0.06
+                                 : searchInput.trailingStarPhase === 1
+                                 ? 0.18
+                                 : searchInput.trailingStarPhase === 2
+                                 ? 0.46
+                                 : searchInput.trailingStarPhase === 3
+                                 ? 1.0
+                                 : 0.62
+                    }
+                }
+
+                DropShadow {
+                    anchors.fill: typingCursorVisual
+                    source: typingCursorVisual
+
+                    horizontalOffset: 0
+                    verticalOffset: 0
+
+                    radius: 5
+                    samples: 5
+
+                    opacity: 0.42
+                    color: Colors.orange
+
+                    transparentBorder: true
+                }
+            }
+
+            Rectangle {
+                id: selectorHeaderDivider
+
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+
+                height: 1
+
+                color: appControlWindow.selectedModeIndex === appControlWindow.killModeIndex
+                       ? Colors.red
+                       : Colors.cyan
+
+                RectangularShadow {
+                    anchors.fill: parent
+                    spread: 3
+                    z: -1
+                    opacity: 0.38
+                    color: selectorHeaderDivider.color
+                }
+            }
+        }
+
+        // ========================================================
+        // RESULTS
+        // ========================================================
+
+        ListView {
+            id: resultList
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: searchHeader.bottom
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin:
+                appControlWindow.selectedModeIndex
+                === appControlWindow.runModeIndex
+                ? runPrefixSelector.height
+                : 0
+
+            // Permanent viewport gap: no app row can ever touch the
+            // header divider, even while the list is scrolled.
+            anchors.topMargin:
+                appControlWindow.selectedModeIndex
+                === appControlWindow.runModeIndex
+                ? runListSelector.height + 8
+                : 8
+
+            clip: true
+
+            boundsBehavior: Flickable.StopAtBounds
+            highlightMoveDuration: 0
+            highlightResizeDuration: 0
+
+            model: appControlWindow.selectedModeIndex === appControlWindow.favoritesModeIndex
+                   ? favoriteResults
+                   : appControlWindow.selectedModeIndex === appControlWindow.appsModeIndex
+                   ? filteredApps
+                   : appControlWindow.selectedModeIndex === appControlWindow.runModeIndex
+                   ? runResults
+                   : appControlWindow.placeholderResults
+
+            footer: Item {
+                width: resultList.width
+                height: 10
+            }
+
+            delegate: Item {
+                id: resultDelegate
+
+                required property int index
+                required property var modelData
+
+                width: resultList.width
+                height: 42
+
+                z: resultButton.isSelected || resultButton.isHovered ? 10 : 0
+
+                Rectangle {
+                    id: resultButton
+
+                    property bool isSelected: resultDelegate.index === appControlWindow.selectedResultIndex
+
+                    property bool isHovered: !appControlWindow.keyboardActive
+                                             && appControlWindow.hoveredResultIndex === resultDelegate.index
+
+                    property bool isPressed: resultMouse.pressed
+
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+
+                    // ONE shared value controls both visible side gaps.
+                    //
+                    // Left:
+                    //   panel divider -> gap -> button
+                    //
+                    // Right:
+                    //   button -> same gap -> scrollbar
+                    anchors.leftMargin: appControlWindow.appSelectorRowGap
+                    anchors.rightMargin:
+                        (resultList.width - resultScrollTrack.x)
+                        + appControlWindow.appSelectorRowGap
+
+                    color: resultButton.isPressed
+                           ? Colors.magenta
+                           : resultButton.isHovered
+                           ? Colors.yellow
+                           : resultButton.isSelected
+                           ? Colors.yellow
+                           : Colors.dark
+
+                Row {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+
+                    anchors.leftMargin: 14
+                    anchors.rightMargin: 38
+
+                    // Do not clip here: the selector icon's DropShadow needs
+                    // room above/below the row. Clipping this Row made the
+                    // halo look offset toward the bottom-right.
+                    clip: false
+
+                    // resultNameGlowBox has 8px internal left padding,
+                    // so 1 + 8 preserves the original 9px icon/name gap.
+                    spacing: 1
+
+                    Item {
+                        id: selectorAppIconBox
+
+                        width: 22
+                        height: 22
+
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        readonly property color sampledGlowColor: {
+                            const cached = appControlWindow.cachedIconGlow(
+                                selectorAppIcon.source
+                            );
+                            return cached !== null ? cached : Colors.cyan;
+                        }
+                        property var iconGrabResult: null
+                        property string samplingSource: ""
+                        property string verifiedSource: ""
+
+                        visible: appControlWindow.resultIsApplication(
+                                     modelData,
+                                     appControlWindow.selectedModeIndex
+                                 )
+                                 && selectorAppIcon.source.toString().length > 0
+
+                        function sampleRenderedIcon() {
+                            const sourceKey = selectorAppIcon.source.toString();
+
+                            if (!sourceKey || selectorAppIcon.status !== Image.Ready)
+                                return;
+
+                            // Verify each rendered source once per delegate.
+                            // Do not trust a stale cache entry here: that was
+                            // why Bottles could begin cyan/blue and flip red
+                            // only after the detail pane sampled it.
+                            if (verifiedSource === sourceKey
+                                    || samplingSource === sourceKey)
+                                return;
+
+                            samplingSource = sourceKey;
+
+                            Qt.callLater(function() {
+                                if (selectorAppIcon.source.toString() !== sourceKey
+                                        || selectorAppIcon.status !== Image.Ready) {
+                                    selectorAppIconBox.samplingSource = "";
+                                    return;
+                                }
+
+                                const started =
+                                    selectorAppIcon.grabToImage(
+                                        function(result) {
+                                            if (selectorAppIcon.source.toString()
+                                                    !== sourceKey) {
+                                                selectorAppIconBox.samplingSource = "";
+                                                return;
+                                            }
+
+                                            // Keep the grab alive until Canvas has
+                                            // sampled its in-memory URL.
+                                            selectorAppIconBox.iconGrabResult =
+                                                result;
+
+                                            selectorIconColorSampler.originalSource =
+                                                sourceKey;
+                                            selectorIconColorSampler.sampleSource =
+                                                result.url.toString();
+                                            selectorIconColorSampler.prepareSample();
+                                        },
+                                        Qt.size(52, 52)
+                                    );
+
+                                if (!started)
+                                    selectorAppIconBox.samplingSource = "";
+                            });
+                        }
+
+                        onVisibleChanged: {
+                            if (visible)
+                                sampleRenderedIcon();
+                        }
+
+                        Component.onCompleted: {
+                            if (visible) {
+                                Qt.callLater(function() {
+                                    selectorAppIconBox.sampleRenderedIcon();
+                                });
+                            }
+                        }
+
+                        Image {
+                            id: selectorAppIcon
+
+                            anchors.fill: parent
+
+                            source: appControlWindow.resultIsApplication(
+                                        modelData,
+                                        appControlWindow.selectedModeIndex
+                                    )
+                                    ? appControlWindow.appIconSource(modelData)
+                                    : ""
+
+                            // Use the same provider raster size as the
+                            // control-panel icon. The item still displays at
+                            // 22x22; only the source raster is higher quality.
+                            sourceSize.width: 52
+                            sourceSize.height: 52
+                            asynchronous: false
+                            cache: true
+                            fillMode: Image.PreserveAspectFit
+                            smooth: false
+
+                            onSourceChanged: {
+                                selectorAppIconBox.iconGrabResult = null;
+                                selectorAppIconBox.samplingSource = "";
+                                selectorAppIconBox.verifiedSource = "";
+
+                                if (status === Image.Ready)
+                                    selectorAppIconBox.sampleRenderedIcon();
+                            }
+
+                            onStatusChanged: {
+                                if (status === Image.Ready)
+                                    selectorAppIconBox.sampleRenderedIcon();
+                            }
+                        }
+
+                        // Safe sampler: this reads a grab of the already-rendered
+                        // Image instead of loading image://icon/... a second time.
+                        Canvas {
+                            id: selectorIconColorSampler
+
+                            width: 18
+                            height: 18
+
+                            opacity: 0.001
+                            z: -100
+
+                            property string sampleSource: ""
+                            property string originalSource: ""
+
+                            function prepareSample() {
+                                if (!sampleSource)
+                                    return;
+
+                                loadImage(
+                                    sampleSource,
+                                    Qt.size(width, height)
+                                );
+
+                                if (isImageLoaded(sampleSource))
+                                    requestPaint();
+                            }
+
+                            onImageLoaded: requestPaint()
+
+                            onPaint: {
+                                if (!sampleSource
+                                        || !isImageLoaded(sampleSource))
+                                    return;
+
+                                const ctx = getContext("2d");
+
+                                ctx.clearRect(0, 0, width, height);
+                                ctx.drawImage(
+                                    sampleSource,
+                                    0,
+                                    0,
+                                    width,
+                                    height
+                                );
+
+                                const pixels =
+                                    ctx.getImageData(
+                                        0,
+                                        0,
+                                        width,
+                                        height
+                                    ).data;
+
+                                const glow =
+                                    appControlWindow.classifyIconGlow(pixels);
+
+                                appControlWindow.rememberIconGlow(
+                                    originalSource,
+                                    glow,
+                                    false
+                                );
+
+                                selectorAppIconBox.verifiedSource =
+                                    originalSource;
+
+                                const finishedSource = sampleSource;
+
+                                Qt.callLater(function() {
+                                    selectorIconColorSampler.unloadImage(
+                                        finishedSource
+                                    );
+                                    selectorIconColorSampler.sampleSource = "";
+                                    selectorAppIconBox.iconGrabResult = null;
+                                    selectorAppIconBox.samplingSource = "";
+                                });
+                            }
+                        }
+
+                        DropShadow {
+                            anchors.fill: selectorAppIcon
+                            source: selectorAppIcon
+
+                            horizontalOffset: 0
+                            verticalOffset: 0
+
+                            radius: resultButton.isPressed ? 10 : 8
+                            samples: resultButton.isPressed ? 7 : 5
+
+                            opacity: selectorAppIcon.status === Image.Ready
+                                     ? (resultButton.isPressed ? 0.85 : 0.52)
+                                     : 0.0
+
+                            color: resultButton.isPressed
+                                   ? Colors.magenta
+                                   : selectorAppIconBox.sampledGlowColor === Colors.white
+                                   ? Colors.cyan
+                                   : selectorAppIconBox.sampledGlowColor
+
+                            transparentBorder: true
+                        }
+                    }
+
+                    Item {
+                        id: resultNameGlowBox
+
+                        width: Math.max(
+                            0,
+                            parent.width
+                            - selectorAppIconBox.width
+                            - parent.spacing
+                        )
+                        height: resultNameText.implicitHeight + 12
+
+                        readonly property color idleTextColor:
+                            appControlWindow.resultIsApplication(
+                                modelData,
+                                appControlWindow.selectedModeIndex
+                            )
+                            && selectorAppIconBox.visible
+                            ? selectorAppIconBox.sampledGlowColor
+                            : Colors.cyan
+
+                        // White app icons keep white letters but use a cyan halo.
+                        readonly property color idleGlowColor:
+                            idleTextColor === Colors.white
+                            ? Colors.cyan
+                            : idleTextColor
+
+                        layer.enabled: !resultButton.isPressed
+                                       && !resultButton.isHovered
+                                       && !resultButton.isSelected
+
+                        layer.effect: DropShadow {
+                            horizontalOffset: 0
+                            verticalOffset: 0
+
+                            radius: 6
+                            samples: 6
+
+                            opacity: 0.38
+                            color: resultNameGlowBox.idleGlowColor
+
+                            transparentBorder: true
+                        }
+
+                        GohuText {
+                            id: resultNameText
+
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: 8
+
+                            text: appControlWindow.resultDisplayName(
+                                      modelData,
+                                      appControlWindow.selectedModeIndex
+                                  )
+
+                            // Keep selector rows visually uniform.
+                            // Long names use the familiar trailing ellipsis.
+                            font.pixelSize: 17
+                            elide: Text.ElideRight
+
+                            color: resultButton.isPressed
+                                   ? Colors.black
+                                   : resultButton.isHovered
+                                   ? Colors.orange
+                                   : resultButton.isSelected
+                                   ? Colors.orange
+                                   : resultNameGlowBox.idleTextColor
+                        }
+                    }
+                }
+
+                MouseArea {
+                    id: resultMouse
+
+                    anchors.fill: parent
+
+                    acceptedButtons: Qt.LeftButton
+
+                    onClicked: {
+                        // A click is always an intentional mouse selection.
+                        appControlWindow.keyboardActive = false;
+                        appControlWindow.hoveredResultIndex = resultDelegate.index;
+                        appControlWindow.selectedResultIndex = resultDelegate.index;
+
+                        if (appControlWindow.resultIsApplication(
+                                    modelData,
+                                    appControlWindow.selectedModeIndex))
+                            appControlWindow.rememberCurrentAppSelection();
+
+                        appControlWindow.resetDetailActionSelection();
+                        appControlWindow.activateSelectedResult();
+                    }
+                }
+
+                Item {
+                    id: favoriteStarButton
+
+                    width: 30
+                    height: 30
+
+                    anchors.right: parent.right
+                    anchors.rightMargin: 6
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    visible: true
+
+                    z: 500
+
+                    readonly property bool favorite:
+                        appControlWindow.isFavoriteItem(
+                            modelData,
+                            appControlWindow.selectedModeIndex
+                        )
+
+                    readonly property bool hovered:
+                        favoriteStarMouse.containsMouse
+
+                    // Normal unfavorited state is the original generic gray.
+                    // Removing a favorite gives a brief black/red confirmation
+                    // flash, then returns to gray automatically.
+                    property bool removalFlash: false
+
+                    readonly property var resolvedAppGlow:
+                        selectorAppIconBox.visible
+                        ? appControlWindow.cachedIconGlow(
+                              selectorAppIcon.source
+                          )
+                        : null
+
+                    readonly property bool appColorReady:
+                        !selectorAppIconBox.visible
+                        || resolvedAppGlow !== null
+
+                    readonly property color appStarColor:
+                        selectorAppIconBox.visible && resolvedAppGlow !== null
+                        ? resolvedAppGlow
+                        : resultNameGlowBox.idleTextColor
+
+                    readonly property color appStarGlowColor:
+                        appStarColor === Colors.white
+                        ? Colors.cyan
+                        : appStarColor
+
+                    Timer {
+                        id: removalFlashTimer
+
+                        interval: 240
+                        repeat: false
+
+                        onTriggered: {
+                            favoriteStarButton.removalFlash = false;
+                        }
+                    }
+
+                    GohuText {
+                        id: favoriteStarGlyph
+
+                        anchors.centerIn: parent
+
+                        text: favoriteStarButton.favorite ? "✦" : "✧"
+
+                        font.pixelSize: 19
+
+                        color: favoriteStarButton.favorite
+                               && favoriteStarButton.appColorReady
+                               ? favoriteStarButton.appStarColor
+                               : favoriteStarButton.removalFlash
+                               ? Colors.black
+                               : Colors.white
+
+                        opacity: favoriteStarButton.favorite
+                                 && favoriteStarButton.appColorReady
+                                 ? 1.0
+                                 : favoriteStarButton.removalFlash
+                                 ? 1.0
+                                 : 0.62
+                    }
+
+                    DropShadow {
+                        anchors.fill: favoriteStarGlyph
+                        source: favoriteStarGlyph
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: favoriteStarButton.favorite
+                                ? 8
+                                : favoriteStarButton.removalFlash
+                                ? 8
+                                : 5
+                        samples: 5
+
+                        opacity: favoriteStarButton.favorite
+                                 && favoriteStarButton.appColorReady
+                                 ? 0.58
+                                 : favoriteStarButton.removalFlash
+                                 ? 0.72
+                                 : (favoriteStarButton.hovered ? 0.20 : 0.08)
+
+                        color: favoriteStarButton.favorite
+                               && favoriteStarButton.appColorReady
+                               ? favoriteStarButton.appStarGlowColor
+                               : favoriteStarButton.removalFlash
+                               ? Colors.red
+                               : Colors.white
+
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: favoriteStarMouse
+
+                        anchors.fill: parent
+
+                        hoverEnabled: true
+                        acceptedButtons: Qt.LeftButton
+                        preventStealing: true
+
+                        onEntered: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.hoveredResultIndex =
+                                resultDelegate.index;
+                            appControlWindow.selectedResultIndex =
+                                resultDelegate.index;
+                        }
+
+                        onClicked: function(mouse) {
+                            mouse.accepted = true;
+
+                            appControlWindow.selectedResultIndex =
+                                resultDelegate.index;
+
+                            const wasFavorite = favoriteStarButton.favorite;
+
+                            appControlWindow.toggleFavorite(
+                                modelData,
+                                appControlWindow.selectedModeIndex
+                            );
+
+                            if (wasFavorite) {
+                                favoriteStarButton.removalFlash = true;
+                                removalFlashTimer.restart();
+                            }
+                        }
+                    }
+                }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 3
+                        z: -1
+
+                        opacity: resultButton.isSelected || resultButton.isHovered ? 0.45 : 0.0
+
+                        color: appControlWindow.selectedModeIndex === appControlWindow.killModeIndex ? Colors.red : Colors.orange
+                    }
+                }
+            }
+
+            // Fixed viewport hover tracker.
+            //
+            // This lives on the ListView viewport rather than inside a delegate.
+            // Its coordinates do not move when content scrolls underneath a
+            // stationary pointer, so only real pointer movement can steal
+            // selection from keyboard navigation.
+            MouseArea {
+                id: resultViewportMouse
+
+                anchors.fill: parent
+                z: 100
+
+                hoverEnabled: true
+                acceptedButtons: Qt.NoButton
+
+                onPositionChanged: function(mouse) {
+                    if (resultList.moving)
+                        return;
+
+                    const rowLeft = appControlWindow.appSelectorRowGap;
+                    const rowRight =
+                        resultScrollTrack.x
+                        - appControlWindow.appSelectorRowGap;
+
+                    const hoveredIndex =
+                        mouse.x >= rowLeft && mouse.x <= rowRight
+                        ? resultList.indexAt(
+                              mouse.x,
+                              mouse.y + resultList.contentY
+                          )
+                        : -1;
+
+                    appControlWindow.hoveredResultIndex = hoveredIndex;
+
+                    if (hoveredIndex < 0)
+                        return;
+
+                    appControlWindow.keyboardActive = false;
+                    appControlWindow.selectedResultIndex = hoveredIndex;
+
+                    if (appControlWindow.selectedResultIsApplication())
+                        appControlWindow.rememberCurrentAppSelection();
+
+                    appControlWindow.resetDetailActionSelection();
+                }
+
+                onExited: {
+                    appControlWindow.hoveredResultIndex = -1;
+                }
+
+                onWheel: function(wheel) {
+                    // Preserve normal ListView wheel/trackpad scrolling.
+                    wheel.accepted = false;
+                }
+            }
+        }
+
+        // ========================================================
+        // RUN LIST SELECTOR — USER / TERMINAL / SYSTEM
+        // ========================================================
+
+        Rectangle {
+            id: runListSelector
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: searchHeader.bottom
+
+            height: 42
+            visible:
+                appControlWindow.selectedModeIndex
+                === appControlWindow.runModeIndex
+
+            color: Colors.black
+            z: 260
+
+            Row {
+                anchors.fill: parent
+
+                anchors.leftMargin: 7
+                anchors.rightMargin: 7
+                anchors.topMargin: 5
+                anchors.bottomMargin: 6
+
+                spacing: 7
+
+                Rectangle {
+                    id: runListUserButton
+
+                    width: (parent.width - (parent.spacing * 2)) / 3
+                    height: parent.height
+
+                    property bool isSelected:
+                        appControlWindow.runListMode
+                        === appControlWindow.runListUser
+                    property bool isHovered: runListUserMouse.containsMouse
+                    property bool isPressed: runListUserMouse.pressed
+
+                    color: isPressed
+                           ? Colors.magenta
+                           : isSelected
+                           ? Colors.yellow
+                           : Colors.dark
+
+                    border.width: 1
+                    border.color: isSelected || isHovered
+                                  ? Colors.orange
+                                  : Colors.cyan
+
+                    GohuText {
+                        id: runListUserText
+
+                        anchors.centerIn: parent
+
+                        text: "USER"
+
+                        font.pixelSize: 15
+
+                        color: runListUserButton.isPressed
+                               ? Colors.black
+                               : runListUserButton.isSelected
+                                 || runListUserButton.isHovered
+                               ? Colors.orange
+                               : Colors.cyan
+                    }
+
+                    DropShadow {
+                        anchors.fill: runListUserText
+                        source: runListUserText
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        opacity: runListUserButton.isPressed
+                                 ? 0.0
+                                 : runListUserButton.isSelected
+                                   || runListUserButton.isHovered
+                                 ? 0.58
+                                 : 0.30
+
+                        color: runListUserButton.isSelected
+                               || runListUserButton.isHovered
+                               ? Colors.orange
+                               : Colors.cyan
+
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: runListUserMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                        onClicked: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.setRunListMode(
+                                appControlWindow.runListUser
+                            );
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 3
+                        z: -1
+
+                        opacity: runListUserButton.isSelected
+                                 || runListUserButton.isHovered
+                                 ? 0.38
+                                 : 0.0
+
+                        color: Colors.orange
+                    }
+                }
+
+                Rectangle {
+                    id: runListTerminalButton
+
+                    width: (parent.width - (parent.spacing * 2)) / 3
+                    height: parent.height
+
+                    property bool isSelected:
+                        appControlWindow.runListMode
+                        === appControlWindow.runListTerminal
+                    property bool isHovered:
+                        runListTerminalMouse.containsMouse
+                    property bool isPressed:
+                        runListTerminalMouse.pressed
+
+                    color: isPressed
+                           ? Colors.magenta
+                           : isSelected
+                           ? Colors.yellow
+                           : Colors.dark
+
+                    border.width: 1
+                    border.color: isSelected || isHovered
+                                  ? Colors.orange
+                                  : Colors.omnitrix
+
+                    GohuText {
+                        id: runListTerminalText
+
+                        anchors.centerIn: parent
+
+                        text: appControlWindow.runTerminalHistoryLoading
+                              ? "TERMINAL ..."
+                              : "TERMINAL"
+
+                        font.pixelSize: 13
+
+                        color: runListTerminalButton.isPressed
+                               ? Colors.black
+                               : runListTerminalButton.isSelected
+                                 || runListTerminalButton.isHovered
+                               ? Colors.orange
+                               : Colors.omnitrix
+                    }
+
+                    DropShadow {
+                        anchors.fill: runListTerminalText
+                        source: runListTerminalText
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        opacity: runListTerminalButton.isPressed
+                                 ? 0.0
+                                 : runListTerminalButton.isSelected
+                                   || runListTerminalButton.isHovered
+                                 ? 0.58
+                                 : 0.34
+
+                        color: runListTerminalButton.isSelected
+                               || runListTerminalButton.isHovered
+                               ? Colors.orange
+                               : Colors.omnitrix
+
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: runListTerminalMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                        onClicked: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.setRunListMode(
+                                appControlWindow.runListTerminal
+                            );
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 3
+                        z: -1
+
+                        opacity: runListTerminalButton.isSelected
+                                 || runListTerminalButton.isHovered
+                                 ? 0.38
+                                 : 0.0
+
+                        color: Colors.orange
+                    }
+                }
+
+                Rectangle {
+                    id: runListAllButton
+
+                    width: (parent.width - (parent.spacing * 2)) / 3
+                    height: parent.height
+
+                    property bool isSelected:
+                        appControlWindow.runListMode
+                        === appControlWindow.runListAll
+                    property bool isHovered: runListAllMouse.containsMouse
+                    property bool isPressed: runListAllMouse.pressed
+
+                    color: isPressed
+                           ? Colors.magenta
+                           : isSelected
+                           ? Colors.yellow
+                           : Colors.dark
+
+                    border.width: 1
+                    border.color: isSelected || isHovered
+                                  ? Colors.orange
+                                  : Colors.magenta
+
+                    GohuText {
+                        id: runListAllText
+
+                        anchors.centerIn: parent
+
+                        text: appControlWindow.runAllCommandsLoading
+                              ? "SYSTEM ..."
+                              : "SYSTEM"
+
+                        font.pixelSize: 15
+
+                        color: runListAllButton.isPressed
+                               ? Colors.black
+                               : runListAllButton.isSelected
+                                 || runListAllButton.isHovered
+                               ? Colors.orange
+                               : Colors.magenta
+                    }
+
+                    DropShadow {
+                        anchors.fill: runListAllText
+                        source: runListAllText
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        opacity: runListAllButton.isPressed
+                                 ? 0.0
+                                 : runListAllButton.isSelected
+                                   || runListAllButton.isHovered
+                                 ? 0.58
+                                 : 0.34
+
+                        color: runListAllButton.isSelected
+                               || runListAllButton.isHovered
+                               ? Colors.orange
+                               : Colors.magenta
+
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: runListAllMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                        onClicked: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.setRunListMode(
+                                appControlWindow.runListAll
+                            );
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 3
+                        z: -1
+
+                        opacity: runListAllButton.isSelected
+                                 || runListAllButton.isHovered
+                                 ? 0.38
+                                 : 0.0
+
+                        color: Colors.orange
+                    }
+                }
+            }
+
+            Rectangle {
+                id: runListBottomDivider
+
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+
+                height: 1
+                color: Colors.cyan
+
+                RectangularShadow {
+                    anchors.fill: parent
+
+                    spread: 3
+                    z: -1
+
+                    opacity: 0.30
+                    color: Colors.cyan
+                }
+            }
+        }
+
+        // ========================================================
+        // RUN PREFIX SELECTOR
+        // ========================================================
+
+        Rectangle {
+            id: runPrefixSelector
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+
+            height: 48
+            visible:
+                appControlWindow.selectedModeIndex
+                === appControlWindow.runModeIndex
+
+            color: Colors.black
+            z: 250
+
+            Rectangle {
+                id: runPrefixTopDivider
+
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+
+                height: 1
+                color: Colors.cyan
+
+                RectangularShadow {
+                    anchors.fill: parent
+
+                    spread: 3
+                    z: -1
+
+                    opacity: 0.38
+                    color: Colors.cyan
+                }
+            }
+
+            Row {
+                id: runPrefixButtons
+
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: runPrefixTopDivider.bottom
+                anchors.bottom: parent.bottom
+
+                anchors.leftMargin: 7
+                anchors.rightMargin: 7
+                anchors.topMargin: 6
+                anchors.bottomMargin: 6
+
+                spacing: 7
+
+                Rectangle {
+                    id: runPrefixNormalButton
+
+                    width: (parent.width - parent.spacing) / 2
+                    height: parent.height
+
+                    property bool isSelected:
+                        appControlWindow.runPrefixMode
+                        === appControlWindow.runPrefixNormal
+                    property bool isHovered: runPrefixNormalMouse.containsMouse
+                    property bool isPressed: runPrefixNormalMouse.pressed
+
+                    color: isPressed
+                           ? Colors.magenta
+                           : isSelected
+                           ? Colors.yellow
+                           : Colors.dark
+
+                    border.width: 1
+                    border.color: isSelected || isHovered
+                                  ? Colors.orange
+                                  : Colors.cyan
+
+                    GohuText {
+                        id: runPrefixNormalIcon
+
+                        anchors.centerIn: parent
+
+                        text: appControlWindow.modes[
+                                  appControlWindow.runModeIndex
+                              ].symbol
+
+                        font.pixelSize: 16
+
+                        color: runPrefixNormalButton.isPressed
+                               ? Colors.black
+                               : runPrefixNormalButton.isSelected
+                                 || runPrefixNormalButton.isHovered
+                               ? Colors.orange
+                               : Colors.cyan
+                    }
+
+                    DropShadow {
+                        anchors.fill: runPrefixNormalIcon
+                        source: runPrefixNormalIcon
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        opacity: runPrefixNormalButton.isPressed
+                                 ? 0.0
+                                 : runPrefixNormalButton.isSelected
+                                   || runPrefixNormalButton.isHovered
+                                 ? 0.62
+                                 : 0.34
+
+                        color: runPrefixNormalButton.isSelected
+                               || runPrefixNormalButton.isHovered
+                               ? Colors.orange
+                               : Colors.cyan
+
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: runPrefixNormalMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                        onClicked: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.setRunPrefixMode(
+                                appControlWindow.runPrefixNormal
+                            );
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 3
+                        z: -1
+
+                        opacity: runPrefixNormalButton.isSelected
+                                 || runPrefixNormalButton.isHovered
+                                 ? 0.42
+                                 : 0.0
+
+                        color: Colors.orange
+                    }
+                }
+
+                Rectangle {
+                    id: runPrefixKittyButton
+
+                    width: (parent.width - parent.spacing) / 2
+                    height: parent.height
+
+                    property bool isSelected:
+                        appControlWindow.runPrefixMode
+                        === appControlWindow.runPrefixKitty
+                    property bool isHovered: runPrefixKittyMouse.containsMouse
+                    property bool isPressed: runPrefixKittyMouse.pressed
+
+                    color: isPressed
+                           ? Colors.magenta
+                           : isSelected
+                           ? Colors.yellow
+                           : Colors.dark
+
+                    border.width: 1
+                    border.color: isSelected || isHovered
+                                  ? Colors.orange
+                                  : Colors.magenta
+
+                    GohuText {
+                        id: runPrefixKittyIcon
+
+                        anchors.centerIn: parent
+
+                        text:
+                            runPrefixKittyButton.isHovered
+                            || runPrefixKittyButton.isPressed
+                            || appControlWindow.kittyFaceClickPulse
+                            ? "≽(^≧⩊≦^)≼"
+                            : appControlWindow.kittyFaceBlinking
+                            ? "≽(^-⩊-^)≼"
+                            : "≽(^•⩊•^)≼"
+
+                        font.pixelSize: 16
+
+                        color: runPrefixKittyButton.isPressed
+                               ? Colors.black
+                               : runPrefixKittyButton.isSelected
+                                 || runPrefixKittyButton.isHovered
+                               ? Colors.orange
+                               : Colors.magenta
+                    }
+
+                    DropShadow {
+                        anchors.fill: runPrefixKittyIcon
+                        source: runPrefixKittyIcon
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        opacity: runPrefixKittyButton.isPressed
+                                 ? 0.0
+                                 : runPrefixKittyButton.isSelected
+                                   || runPrefixKittyButton.isHovered
+                                 ? 0.62
+                                 : 0.38
+
+                        color: runPrefixKittyButton.isSelected
+                               || runPrefixKittyButton.isHovered
+                               ? Colors.orange
+                               : Colors.magenta
+
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: runPrefixKittyMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                        onClicked: {
+                            appControlWindow.keyboardActive = false;
+
+                            appControlWindow.kittyFaceClickPulse = true;
+                            kittyFaceClickPulseTimer.restart();
+
+                            appControlWindow.setRunPrefixMode(
+                                appControlWindow.runPrefixKitty
+                            );
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 3
+                        z: -1
+
+                        opacity: runPrefixKittyButton.isSelected
+                                 || runPrefixKittyButton.isHovered
+                                 ? 0.42
+                                 : 0.0
+
+                        color: Colors.orange
+                    }
+                }
+            }
+        }
+
+        // ========================================================
+        // APP SELECTOR SCROLLBAR
+        // ========================================================
+
+        Rectangle {
+            id: resultScrollTrack
+
+            width: 10
+
+            anchors.top: searchHeader.bottom
+            anchors.bottom: parent.bottom
+            anchors.right: parent.right
+
+            anchors.topMargin:
+                appControlWindow.selectedModeIndex
+                === appControlWindow.runModeIndex
+                ? runListSelector.height
+                : 0
+            anchors.bottomMargin:
+                appControlWindow.selectedModeIndex
+                === appControlWindow.runModeIndex
+                ? runPrefixSelector.height + 4
+                : 4
+            anchors.rightMargin: 3
+
+            color: Colors.cyan
+
+            opacity: resultList.contentHeight > resultList.height ? 0.9 : 0.0
+            visible: opacity > 0.0
+
+            z: 300
+
+            property real maxContentY: Math.max(
+                0,
+                resultList.contentHeight - resultList.height
+            )
+
+            property real handleTravel: Math.max(
+                0,
+                height - resultScrollHandle.height
+            )
+
+            function setScrollFromHandleY(handleY) {
+                if (maxContentY <= 0 || handleTravel <= 0)
+                    return;
+
+                const clampedY = Math.max(
+                    0,
+                    Math.min(handleTravel, handleY)
+                );
+
+                resultList.contentY =
+                    (clampedY / handleTravel) * maxContentY;
+            }
+
+            Rectangle {
+                id: resultScrollHandle
+
+                width: 6
+                anchors.horizontalCenter: parent.horizontalCenter
+
+                height: Math.max(
+                    30,
+                    parent.height * Math.min(
+                        1.0,
+                        resultList.visibleArea.heightRatio
+                    )
+                )
+
+                y: {
+                    if (resultScrollTrack.maxContentY <= 0
+                            || resultScrollTrack.handleTravel <= 0)
+                        return 0;
+
+                    const clampedContentY = Math.max(
+                        0,
+                        Math.min(
+                            resultScrollTrack.maxContentY,
+                            resultList.contentY
+                        )
+                    );
+
+                    return (clampedContentY / resultScrollTrack.maxContentY)
+                            * resultScrollTrack.handleTravel;
+                }
+
+                color: Colors.magenta
+
+                RectangularShadow {
+                    anchors.fill: parent
+
+                    spread: 2
+                    z: -1
+
+                    opacity: 0.16
+                    color: Colors.magenta
+                }
+            }
+
+            MouseArea {
+                id: resultScrollMouse
+
+                anchors.fill: parent
+
+                hoverEnabled: true
+                acceptedButtons: Qt.LeftButton
+
+                property real dragOffset: 0
+
+                onPressed: function(mouse) {
+                    const handleTop = resultScrollHandle.y;
+                    const handleBottom =
+                        resultScrollHandle.y + resultScrollHandle.height;
+
+                    if (mouse.y >= handleTop && mouse.y <= handleBottom) {
+                        // Dragging directly from the magenta handle.
+                        dragOffset = mouse.y - resultScrollHandle.y;
+                    } else {
+                        // Clicking the cyan track jumps the handle toward
+                        // that location and immediately allows dragging.
+                        dragOffset = resultScrollHandle.height / 2;
+                        resultScrollTrack.setScrollFromHandleY(
+                            mouse.y - dragOffset
+                        );
+                    }
+
+                    mouse.accepted = true;
+                }
+
+                onPositionChanged: function(mouse) {
+                    if (!pressed)
+                        return;
+
+                    resultScrollTrack.setScrollFromHandleY(
+                        mouse.y - dragOffset
+                    );
+                }
+
+                onWheel: function(wheel) {
+                    // Wheel/trackpad scrolling still belongs to the ListView.
+                    wheel.accepted = false;
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // DETAIL / CONTROL PANE
+    // ============================================================
+
+    Rectangle {
+        id: detailPane
+
+        anchors.left: resultsPane.right
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+
+        anchors.rightMargin: 12
+        anchors.topMargin: 12
+        anchors.bottomMargin: 12
+
+        color: Qt.rgba(Colors.black.r, Colors.black.g, Colors.black.b, 0.95)
+
+        border.width: 1
+
+        border.color: appControlWindow.detailFocused ? Colors.orange : Colors.cyan
+
+        Rectangle {
+            id: detailTopBar
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+
+            anchors.leftMargin: 5
+            anchors.rightMargin: 5
+            anchors.topMargin: 8
+
+            height: 2
+
+            color: Colors.cyan
+
+            RectangularShadow {
+                anchors.fill: parent
+                spread: 3
+                z: -1
+                opacity: 0.38
+                color: Colors.cyan
+            }
+        }
+
+        // Everything above the RUNNING STATE divider stays fixed.
+        Column {
+            id: detailStaticHeader
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+
+            anchors.leftMargin: 25
+            anchors.rightMargin: 25
+            anchors.topMargin: 25
+
+            spacing: 18
+
+            Item {
+                id: appControlHeader
+
+                width: parent.width
+                height: 28
+
+                // The title is centered on the pane itself. Each icon gets
+                // exactly one half of the remaining space between the title
+                // and its corresponding side, so the header stays balanced
+                // even when APPLICATION CONTROL / COMMAND CONTROL differ in
+                // width.
+                Item {
+                    id: applicationControlTitleBox
+
+                    width: applicationControlTitle.implicitWidth
+                    height: applicationControlTitle.implicitHeight
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    GohuText {
+                        id: applicationControlTitle
+
+                        anchors.centerIn: parent
+
+                        text:
+                            appControlWindow.selectedControlModeIndex()
+                            === appControlWindow.runModeIndex
+                            ? "COMMAND CONTROL"
+                            : "APPLICATION CONTROL"
+
+                        font.pixelSize: 20
+                        color: Colors.cyan
+                    }
+
+                    DropShadow {
+                        anchors.fill: applicationControlTitle
+                        source: applicationControlTitle
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 14
+                        samples: 11
+
+                        z: 2
+
+                        opacity: 0.75
+                        color: Colors.cyan
+
+                        transparentBorder: true
+                    }
+                }
+
+                Item {
+                    id: controlModeIconLeftRegion
+
+                    anchors.left: parent.left
+                    anchors.right: applicationControlTitleBox.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+
+                    Item {
+                        width: controlModeIcon.implicitWidth
+                        height: controlModeIcon.implicitHeight
+
+                        anchors.centerIn: parent
+                        anchors.horizontalCenterOffset: -14
+
+                        GohuText {
+                            id: controlModeIcon
+
+                            anchors.centerIn: parent
+
+                            text: appControlWindow.modes[
+                                      appControlWindow.selectedControlModeIndex()
+                                  ].symbol
+
+                            font.pixelSize: 20
+                            color: Colors.magenta
+                        }
+
+                        DropShadow {
+                            anchors.fill: controlModeIcon
+                            source: controlModeIcon
+
+                            horizontalOffset: 0
+                            verticalOffset: 0
+
+                            radius: 18
+                            samples: 9
+
+                            z: 2
+
+                            opacity: 0.9
+                            color: Colors.magenta
+
+                            transparentBorder: true
+                        }
+                    }
+                }
+
+                Item {
+                    id: controlModeIconRightRegion
+
+                    anchors.left: applicationControlTitleBox.right
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+
+                    Item {
+                        id: controlModeIconRightBox
+
+                        width: controlModeIconRight.implicitWidth
+                        height: controlModeIconRight.implicitHeight
+
+                        anchors.centerIn: parent
+                        anchors.horizontalCenterOffset: 14
+
+                        // Mirror the right-side symbol so directional glyphs
+                        // face inward toward the centered header title.
+                        transform: Scale {
+                            origin.x: controlModeIconRightBox.width / 2
+                            origin.y: controlModeIconRightBox.height / 2
+                            xScale: -1
+                            yScale: 1
+                        }
+
+                        GohuText {
+                            id: controlModeIconRight
+
+                            anchors.centerIn: parent
+
+                            text: appControlWindow.modes[
+                                      appControlWindow.selectedControlModeIndex()
+                                  ].symbol
+
+                            font.pixelSize: 20
+                            color: Colors.magenta
+                        }
+
+                        DropShadow {
+                            anchors.fill: controlModeIconRight
+                            source: controlModeIconRight
+
+                            horizontalOffset: 0
+                            verticalOffset: 0
+
+                            radius: 18
+                            samples: 9
+
+                            z: 2
+
+                            opacity: 0.9
+                            color: Colors.magenta
+
+                            transparentBorder: true
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                id: detailHeaderDivider
+
+                width: parent.width + 40
+                height: 2
+
+                x: -20
+                z: 20
+
+                color: Colors.cyan
+
+                RectangularShadow {
+                    anchors.fill: parent
+                    spread: 3
+                    z: -1
+                    opacity: 0.38
+                    color: Colors.cyan
+                }
+            }
+
+            Item {
+                id: selectedAppInfoBand
+
+                // Keep the content geometry unchanged, but trim the lower
+                // breathing room so the state divider/header sits closer to
+                // the identity block in both APPS and RUN.
+                width: parent.width + 50
+                x: -25
+
+                height: selectedAppInfoContent.implicitHeight + 12
+                clip: false
+
+                Item {
+                    id: selectedAppInfoBackground
+
+                    x: 0
+                    y: -18
+
+                    width: parent.width
+
+                    // Stop exactly at the fixed divider for the current
+                    // control mode. APPS uses RUNNING STATE; RUN uses the
+                    // matching divider slot added below.
+                    height: Math.max(
+                        parent.height,
+                        ((appControlWindow.selectedResultIsRun()
+                          ? runControlDividerSection.y
+                            + runControlDivider.y
+                          : runningStateSection.y
+                            + runningStateDivider.y)
+                         - selectedAppInfoBand.y)
+                        - y
+                    )
+
+                    clip: true
+                    z: -1
+
+                    // Slightly inset + blurred so the dark band's edges
+                    // feather inward instead of ending as a hard rectangle.
+                    Rectangle {
+                        id: selectedAppInfoBackgroundFill
+
+                        anchors.fill: parent
+                        anchors.margins: 2
+
+                        color: Qt.rgba(
+                            Colors.dark.r,
+                            Colors.dark.g,
+                            Colors.dark.b,
+                            0.80
+                        )
+
+                        layer.enabled: true
+                        layer.effect: GaussianBlur {
+                            radius: 8
+                            samples: 9
+                            transparentBorder: true
+                        }
+                    }
+                }
+
+                Column {
+                    id: selectedAppInfoContent
+
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+
+                    anchors.leftMargin: 25
+                    anchors.rightMargin: 25
+                    anchors.topMargin: 8
+
+                    spacing: 18
+
+                            Row {
+                                id: selectedAppIdentity
+
+                                width: parent.width
+                                spacing: 14
+
+                                property var currentResult: appControlWindow.selectedResult()
+                                property bool showingApp:
+                                    appControlWindow.selectedResultIsApplication()
+                                    && currentResult
+                                property bool showingRun:
+                                    appControlWindow.selectedResultIsRun()
+                                    && currentResult
+
+                                Item {
+                                    id: selectedAppIconBox
+
+                                    width: 52
+                                    height: 52
+
+                                    readonly property color sampledGlowColor: {
+                                        const cached = appControlWindow.cachedIconGlow(
+                                            selectedAppIcon.source
+                                        );
+                                        return cached !== null ? cached : Colors.cyan;
+                                    }
+                                    property var iconGrabResult: null
+                                    property string samplingSource: ""
+                                    property string authoritativeSource: ""
+
+                                    visible: selectedAppIdentity.showingApp
+
+                                    function sampleRenderedIcon() {
+                                        const sourceKey = selectedAppIcon.source.toString();
+
+                                        if (!sourceKey || selectedAppIcon.status !== Image.Ready)
+                                            return;
+
+                                        if (authoritativeSource === sourceKey
+                                                || samplingSource === sourceKey)
+                                            return;
+
+                                        samplingSource = sourceKey;
+
+                                        Qt.callLater(function() {
+                                            if (selectedAppIcon.source.toString() !== sourceKey
+                                                    || selectedAppIcon.status !== Image.Ready) {
+                                                selectedAppIconBox.samplingSource = "";
+                                                return;
+                                            }
+
+                                            const started =
+                                                selectedAppIcon.grabToImage(
+                                                    function(result) {
+                                                        if (selectedAppIcon.source.toString()
+                                                                !== sourceKey) {
+                                                            selectedAppIconBox.samplingSource = "";
+                                                            return;
+                                                        }
+
+                                                        selectedAppIconBox.iconGrabResult =
+                                                            result;
+
+                                                        selectedIconColorSampler.originalSource =
+                                                            sourceKey;
+                                                        selectedIconColorSampler.sampleSource =
+                                                            result.url.toString();
+                                                        selectedIconColorSampler.prepareSample();
+                                                    },
+                                                    Qt.size(18, 18)
+                                                );
+
+                                            if (!started)
+                                                selectedAppIconBox.samplingSource = "";
+                                        });
+                                    }
+
+                                    onVisibleChanged: {
+                                        if (visible)
+                                            sampleRenderedIcon();
+                                    }
+
+                                    Component.onCompleted: {
+                                        if (visible) {
+                                            Qt.callLater(function() {
+                                                selectedAppIconBox.sampleRenderedIcon();
+                                            });
+                                        }
+                                    }
+
+                                    Image {
+                                        id: selectedAppIcon
+
+                                        anchors.fill: parent
+
+                                        source: selectedAppIdentity.showingApp
+                                                ? appControlWindow.appIconSource(selectedAppIdentity.currentResult)
+                                                : ""
+
+                                        sourceSize.width: 52
+                                        sourceSize.height: 52
+                                        asynchronous: false
+                                        cache: true
+                                        fillMode: Image.PreserveAspectFit
+                                        smooth: false
+
+                                        onSourceChanged: {
+                                            selectedAppIconBox.iconGrabResult = null;
+                                            selectedAppIconBox.samplingSource = "";
+                                            selectedAppIconBox.authoritativeSource = "";
+
+                                            if (status === Image.Ready)
+                                                selectedAppIconBox.sampleRenderedIcon();
+                                        }
+
+                                        onStatusChanged: {
+                                            if (status === Image.Ready)
+                                                selectedAppIconBox.sampleRenderedIcon();
+                                        }
+                                    }
+
+                                    Canvas {
+                                        id: selectedIconColorSampler
+
+                                        width: 18
+                                        height: 18
+
+                                        opacity: 0.001
+                                        z: -100
+
+                                        property string sampleSource: ""
+                                        property string originalSource: ""
+
+                                        function prepareSample() {
+                                            if (!sampleSource)
+                                                return;
+
+                                            loadImage(
+                                                sampleSource,
+                                                Qt.size(width, height)
+                                            );
+
+                                            if (isImageLoaded(sampleSource))
+                                                requestPaint();
+                                        }
+
+                                        onImageLoaded: requestPaint()
+
+                                        onPaint: {
+                                            if (!sampleSource
+                                                    || !isImageLoaded(sampleSource))
+                                                return;
+
+                                            const ctx = getContext("2d");
+
+                                            ctx.clearRect(0, 0, width, height);
+                                            ctx.drawImage(
+                                                sampleSource,
+                                                0,
+                                                0,
+                                                width,
+                                                height
+                                            );
+
+                                            const pixels =
+                                                ctx.getImageData(
+                                                    0,
+                                                    0,
+                                                    width,
+                                                    height
+                                                ).data;
+
+                                            const glow =
+                                                appControlWindow.classifyIconGlow(pixels);
+
+                                            selectedAppIconBox.authoritativeSource =
+                                                originalSource;
+
+                                            appControlWindow.rememberIconGlow(
+                                                originalSource,
+                                                glow,
+                                                true
+                                            );
+
+                                            const finishedSource = sampleSource;
+
+                                            Qt.callLater(function() {
+                                                selectedIconColorSampler.unloadImage(
+                                                    finishedSource
+                                                );
+                                                selectedIconColorSampler.sampleSource = "";
+                                                selectedAppIconBox.iconGrabResult = null;
+                                                selectedAppIconBox.samplingSource = "";
+                                            });
+                                        }
+                                    }
+
+                                    DropShadow {
+                                        anchors.fill: selectedAppIcon
+                                        source: selectedAppIcon
+
+                                        horizontalOffset: 0
+                                        verticalOffset: 0
+
+                                        radius: 12
+                                        samples: 5
+
+                                        opacity: selectedAppIcon.status === Image.Ready
+                                                 ? 0.50
+                                                 : 0.0
+
+                                        color: selectedAppIconBox.sampledGlowColor === Colors.white
+                                               ? Colors.cyan
+                                               : selectedAppIconBox.sampledGlowColor
+
+                                        transparentBorder: true
+                                    }
+                                }
+
+                                Column {
+                                    width: parent.width - (selectedAppIdentity.showingApp ? 66 : 0)
+                                    spacing: 5
+
+                                    Item {
+                                        width: parent.width
+                                        height: selectedAppName.implicitHeight
+
+                                        GohuText {
+                                            id: selectedAppName
+
+                                            width: parent.width
+
+                                            text: selectedAppIdentity.showingApp
+                                                  ? appControlWindow.appDisplayName(selectedAppIdentity.currentResult)
+                                                  : selectedAppIdentity.showingRun
+                                                  ? appControlWindow.runCommandText(
+                                                        selectedAppIdentity.currentResult
+                                                    )
+                                                  : (selectedAppIdentity.currentResult
+                                                     ? appControlWindow.resultDisplayName(
+                                                           selectedAppIdentity.currentResult,
+                                                           appControlWindow.selectedModeIndex
+                                                       )
+                                                     : "NO SELECTION")
+
+                                            // Keep the App Control panel width
+                                            // fixed and scale only long names.
+                                            // Normal names remain 22px.
+                                            font.pixelSize: 22
+                                            fontSizeMode: Text.HorizontalFit
+                                            minimumPixelSize: 13
+
+                                            color: Colors.orange
+
+                                            // Safety fallback if a name is
+                                            // extreme even at 13px.
+                                            elide: Text.ElideRight
+                                        }
+
+                                        DropShadow {
+                                            anchors.fill: selectedAppName
+                                            source: selectedAppName
+
+                                            horizontalOffset: 0
+                                            verticalOffset: 0
+
+                                            radius: 14
+                                            samples: 11
+
+                                            z: 2
+
+                                            opacity: 0.7
+                                            color: Colors.orange
+
+                                            transparentBorder: true
+                                        }
+                                    }
+
+                                    GohuText {
+                                        width: parent.width
+
+                                        text: selectedAppIdentity.showingApp
+                                              ? appControlWindow.appDisplayDescription(
+                                                    selectedAppIdentity.currentResult
+                                                )
+                                              : selectedAppIdentity.showingRun
+                                              ? "RUN COMMAND • "
+                                                + appControlWindow.runPrefixName(
+                                                      appControlWindow.runPrefixModeForEntry(
+                                                          appControlWindow.favoriteSourceItem(
+                                                              selectedAppIdentity.currentResult
+                                                          )
+                                                      )
+                                                  )
+                                                + " • "
+                                                + appControlWindow.runShellName().toUpperCase()
+                                              : "Phase 1 placeholder"
+
+                                        font.pixelSize: 15
+
+                                        color: Colors.white
+                                        opacity: 1.0
+
+                                        elide: Text.ElideRight
+
+                                        layer.enabled: true
+                                        layer.effect: DropShadow {
+                                            horizontalOffset: 0
+                                            verticalOffset: 0
+
+                                            radius: 6
+                                            samples: 7
+
+                                            opacity: 0.24
+                                            color: Colors.cyan
+
+                                            transparentBorder: true
+                                        }
+                                    }
+                                }
+                            }
+
+                            GohuText {
+                                property var currentResult: appControlWindow.selectedResult()
+
+                                width: parent.width
+
+                                text: appControlWindow.selectedResultIsApplication()
+                                      && currentResult
+                                      ? appControlWindow.appLongDescription(currentResult)
+                                      : appControlWindow.selectedResultIsRun()
+                                        && currentResult
+                                      ? "EXECUTES : "
+                                        + appControlWindow.runEffectiveCommand(
+                                              appControlWindow.runCommandText(
+                                                  appControlWindow.favoriteSourceItem(
+                                                      currentResult
+                                                  )
+                                              ),
+                                              appControlWindow.runPrefixModeForEntry(
+                                                  appControlWindow.favoriteSourceItem(
+                                                      currentResult
+                                                  )
+                                              )
+                                          )
+                                      : ""
+
+                                visible: text.length > 0
+
+                                wrapMode: Text.Wrap
+
+                                font.pixelSize: 14
+
+                                color: Colors.white
+
+                                opacity: 0.5
+                            }
+                }
+            }
+
+            Column {
+                id: runningStateSection
+
+                width: parent.width
+                spacing: 3
+
+                visible: appControlWindow.selectedResultIsApplication()
+                         && appControlWindow.selectedResult() !== null
+
+                Item {
+                    id: runningStateHeaderGlowBox
+
+                    width: runningStateHeaderText.implicitWidth + 24
+                    height: runningStateHeaderText.implicitHeight + 8
+
+                    layer.enabled: true
+                    layer.effect: DropShadow {
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 7
+
+                        opacity: 0.38
+                        color: Colors.cyan
+
+                        transparentBorder: true
+                    }
+
+                    GohuText {
+                        id: runningStateHeaderText
+
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12
+
+                        text: "RUNNING STATE"
+
+                        font.pixelSize: 13
+                        color: Colors.cyan
+                    }
+                }
+
+                Rectangle {
+                    id: runningStateDivider
+
+                    width: parent.width + 20
+                    height: 1
+
+                    x: -10
+                    z: 20
+
+                    color: Colors.cyan
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 3
+                        z: -1
+
+                        opacity: 0.38
+                        color: Colors.cyan
+                    }
+                }
+            }
+
+            Column {
+                id: runControlDividerSection
+
+                width: parent.width
+                spacing: 3
+
+                visible: appControlWindow.selectedResultIsRun()
+                         && appControlWindow.selectedResult() !== null
+
+                Item {
+                    id: commandStateHeaderGlowBox
+
+                    width: commandStateHeaderText.implicitWidth + 24
+                    height: commandStateHeaderText.implicitHeight + 8
+
+                    layer.enabled: true
+                    layer.effect: DropShadow {
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 7
+
+                        opacity: 0.38
+                        color: Colors.cyan
+
+                        transparentBorder: true
+                    }
+
+                    GohuText {
+                        id: commandStateHeaderText
+
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12
+
+                        text: "COMMAND STATE"
+
+                        font.pixelSize: 13
+                        color: Colors.cyan
+                    }
+                }
+
+                Rectangle {
+                    id: runControlDivider
+
+                    width: parent.width + 20
+                    height: 1
+
+                    x: -10
+                    z: 20
+
+                    color: Colors.cyan
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 3
+                        z: -1
+
+                        opacity: 0.38
+                        color: Colors.cyan
+                    }
+                }
+            }
+        }
+
+        // Only content BELOW the APPS/RUN static divider scrolls.
+        Flickable {
+            id: detailFlickable
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: detailStaticHeader.bottom
+            anchors.bottom: detailBottomBar.top
+
+            anchors.leftMargin: 25
+            anchors.rightMargin: 25
+            anchors.topMargin: 8
+            anchors.bottomMargin: 8
+
+            clip: true
+
+            contentWidth: width
+            contentHeight: detailContent.implicitHeight
+
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.VerticalFlick
+
+            Column {
+                id: detailContent
+
+                width: detailFlickable.width
+                spacing: 18
+
+                Column {
+                    id: runningStateBody
+
+                    width: parent.width
+                    spacing: 6
+
+                    visible: appControlWindow.selectedResultIsApplication()
+                             && appControlWindow.selectedResult() !== null
+
+                GohuText {
+                    width: parent.width
+
+                    visible: !appControlWindow.windowDataReady
+
+                    text: appControlWindow.windowDataError.length > 0
+                          ? "SWAY STATE UNAVAILABLE"
+                          : "CHECKING..."
+
+                    font.pixelSize: 15
+                    color: Colors.white
+                    opacity: 0.6
+                }
+
+                GohuText {
+                    width: parent.width
+
+                    visible: appControlWindow.windowDataReady
+                             && appControlWindow.selectedAppWindows.length === 0
+
+                    text: "NOT RUNNING"
+
+                    font.pixelSize: 15
+                    color: Colors.white
+                    opacity: 0.6
+                }
+
+                GridLayout {
+                    id: runningStateGrid
+
+                    width: parent.width
+
+                    columns: 3
+                    columnSpacing: 6
+                    rowSpacing: 4
+
+                    visible: appControlWindow.windowDataReady
+                             && appControlWindow.selectedAppWindows.length > 0
+
+                    property var workspaceNames: appControlWindow.workspaceList(
+                        appControlWindow.selectedAppWindows
+                    )
+
+                    // ------------------------------------------------
+                    // ROW 1: RUNNING : <count> WINDOWS
+                    // ------------------------------------------------
+
+                    Item {
+                        Layout.preferredWidth: 92
+                        Layout.preferredHeight: 24
+
+                        layer.enabled: true
+                        layer.effect: DropShadow {
+                            horizontalOffset: 0
+                            verticalOffset: 0
+
+                            radius: 7
+                            samples: 7
+
+                            opacity: 0.38
+                            color: Colors.magenta
+
+                            transparentBorder: true
+                        }
+
+                        GohuText {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: "RUNNING"
+
+                            font.pixelSize: 15
+                            color: Colors.magenta
+                        }
+                    }
+
+                    GohuText {
+                        Layout.preferredWidth: 10
+                        Layout.preferredHeight: 24
+                        Layout.alignment: Qt.AlignVCenter
+
+                        text: ":"
+
+                        font.pixelSize: 15
+                        color: Colors.white
+
+                        verticalAlignment: Text.AlignVCenter
+                    }
+
+                    Row {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 24
+                        Layout.alignment: Qt.AlignVCenter
+
+                        spacing: 5
+
+                        GohuText {
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: appControlWindow.selectedAppWindows.length
+
+                            font.pixelSize: 15
+                            color: Colors.magenta
+
+                            layer.enabled: true
+                            layer.effect: DropShadow {
+                                horizontalOffset: 0
+                                verticalOffset: 0
+
+                                radius: 7
+                                samples: 7
+
+                                opacity: 0.38
+                                color: Colors.magenta
+
+                                transparentBorder: true
+                            }
+                        }
+
+                        GohuText {
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: appControlWindow.selectedAppWindows.length === 1
+                                  ? "WINDOW"
+                                  : "WINDOWS"
+
+                            font.pixelSize: 15
+                            color: Colors.white
+
+                            layer.enabled: true
+                            layer.effect: DropShadow {
+                                horizontalOffset: 0
+                                verticalOffset: 0
+
+                                radius: 7
+                                samples: 7
+
+                                opacity: 0.38
+                                color: Colors.cyan
+
+                                transparentBorder: true
+                            }
+                        }
+                    }
+
+                    // ------------------------------------------------
+                    // ROW 2: WORKSPACE : 1, 4, 6
+                    // ------------------------------------------------
+
+                    Item {
+                        Layout.preferredWidth: 92
+                        Layout.preferredHeight: 24
+
+                        GohuText {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: runningStateGrid.workspaceNames.length === 1
+                                  ? "WORKSPACE"
+                                  : "WORKSPACES"
+
+                            font.pixelSize: 13
+                            color: Colors.orange
+                            opacity: 1.0
+
+                            layer.enabled: true
+                            layer.effect: DropShadow {
+                                horizontalOffset: 0
+                                verticalOffset: 0
+
+                                radius: 7
+                                samples: 7
+
+                                opacity: 0.38
+                                color: Colors.orange
+
+                                transparentBorder: true
+                            }
+                        }
+                    }
+
+                    GohuText {
+                        Layout.preferredWidth: 10
+                        Layout.preferredHeight: 24
+                        Layout.alignment: Qt.AlignVCenter
+
+                        text: ":"
+
+                        font.pixelSize: 13
+                        color: Colors.white
+
+                        verticalAlignment: Text.AlignVCenter
+                    }
+
+                    Row {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 24
+                        Layout.alignment: Qt.AlignVCenter
+
+                        spacing: 0
+
+                        Repeater {
+                            model: runningStateGrid.workspaceNames
+
+                            Row {
+                                required property int index
+                                required property var modelData
+
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 0
+
+                                GohuText {
+                                    text: modelData
+
+                                    font.pixelSize: 13
+                                    color: Colors.orange
+
+                                    layer.enabled: true
+                                    layer.effect: DropShadow {
+                                        horizontalOffset: 0
+                                        verticalOffset: 0
+
+                                        radius: 7
+                                        samples: 7
+
+                                        opacity: 0.38
+                                        color: Colors.orange
+
+                                        transparentBorder: true
+                                    }
+                                }
+
+                                GohuText {
+                                    visible: index < runningStateGrid.workspaceNames.length - 1
+
+                                    text: ", "
+
+                                    font.pixelSize: 13
+                                    color: Colors.white
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Column {
+                id: appActionSection
+
+                width: parent.width
+                spacing: 8
+
+                visible: appControlWindow.selectedResultIsApplication()
+                         && appControlWindow.selectedResult() !== null
+
+                Item {
+                    id: actionsHeaderGlowBox
+
+                    width: actionsHeaderText.implicitWidth + 24
+                    height: actionsHeaderText.implicitHeight + 16
+
+                    layer.enabled: true
+                    layer.effect: DropShadow {
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 7
+
+                        opacity: 0.38
+                        color: Colors.cyan
+
+                        transparentBorder: true
+                    }
+
+                    GohuText {
+                        id: actionsHeaderText
+
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12
+
+                        text: "ACTIONS"
+
+                        font.pixelSize: 13
+
+                        color: Colors.cyan
+                    }
+                }
+
+                Rectangle {
+                    id: launchAction
+
+                    width: parent.width - 10
+                    height: 38
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+
+                    property bool isHovered: !appControlWindow.keyboardActive && launchMouse.containsMouse
+                    property bool isPressed: launchMouse.pressed
+                    property bool isSelected: appControlWindow.detailFocused
+                                              && appControlWindow.selectedDetailActionIndex === 0
+
+                    color: isPressed
+                           ? Colors.magenta
+                           : isHovered || isSelected
+                           ? Colors.yellow
+                           : Colors.dark
+
+                    border.width: 1
+                    border.color: isHovered || isSelected ? Colors.orange : Colors.cyan
+
+                    GohuText {
+                        id: launchActionText
+
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12
+
+                        text: "LAUNCH"
+
+                        font.pixelSize: 15
+
+                        color: launchAction.isPressed
+                               ? Colors.black
+                               : launchAction.isHovered || launchAction.isSelected
+                               ? Colors.orange
+                               : Colors.cyan
+                    }
+
+                    DropShadow {
+                        anchors.fill: launchActionText
+                        source: launchActionText
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        z: 2
+
+                        opacity: launchAction.isPressed
+                                 ? 0.0
+                                 : launchAction.isHovered || launchAction.isSelected
+                                 ? 0.48
+                                 : 0.38
+
+                        color: launchAction.isHovered || launchAction.isSelected
+                               ? Colors.orange
+                               : Colors.cyan
+
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: launchMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                        onEntered: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.selectedDetailActionIndex = 0;
+                        }
+
+                        onClicked: {
+                            appControlWindow.selectedDetailActionIndex = 0;
+                            appControlWindow.activateSelectedDetailAction();
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 5
+                        z: -1
+
+                        opacity: launchAction.isHovered || launchAction.isSelected
+                                 ? 0.62
+                                 : 0.26
+
+                        color: launchAction.isHovered || launchAction.isSelected
+                               ? Colors.orange
+                               : Colors.cyan
+                    }
+                }
+
+                GohuText {
+                    property var currentResult: appControlWindow.selectedResult()
+
+                    text: currentResult && currentResult.actions.length > 0
+                          ? "DESKTOP ACTIONS"
+                          : ""
+
+                    visible: text.length > 0
+
+                    font.pixelSize: 13
+
+                    color: Colors.orange
+                    opacity: 0.75
+
+                    layer.enabled: visible
+                    layer.effect: DropShadow {
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 5
+                        samples: 5
+
+                        opacity: 0.20
+                        color: Colors.orange
+
+                        transparentBorder: true
+                    }
+                }
+
+                Repeater {
+                    id: desktopActionsRepeater
+
+                    model: {
+                        const entry = appControlWindow.selectedResult();
+
+                        if (!appControlWindow.selectedResultIsApplication() || !entry)
+                            return [];
+
+                        return entry.actions;
+                    }
+
+                    Rectangle {
+                        id: desktopActionButton
+
+                        required property int index
+                        required property var modelData
+
+                        width: appActionSection.width - 10
+                        height: 34
+
+                        anchors.horizontalCenter: parent.horizontalCenter
+
+                        property bool isHovered: !appControlWindow.keyboardActive && desktopActionMouse.containsMouse
+                        property bool isPressed: desktopActionMouse.pressed
+                        property bool isSelected: appControlWindow.detailFocused
+                                                  && appControlWindow.selectedDetailActionIndex === index + 1
+
+                        color: isPressed
+                               ? Colors.magenta
+                               : isHovered || isSelected
+                               ? Colors.yellow
+                               : Colors.black
+
+                        border.width: 1
+                        border.color: Colors.orange
+
+                        Row {
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: 10
+
+                            spacing: 8
+
+                            Image {
+                                width: 18
+                                height: 18
+
+                                source: appControlWindow.safeActionIconSource(modelData.icon)
+
+                                visible: source.toString().length > 0
+
+                                sourceSize.width: 18
+                                sourceSize.height: 18
+                                asynchronous: false
+                                cache: true
+                                fillMode: Image.PreserveAspectFit
+                                smooth: false
+                            }
+
+                            Item {
+                                width: desktopActionText.implicitWidth
+                                height: desktopActionText.implicitHeight
+
+                                anchors.verticalCenter: parent.verticalCenter
+
+                                GohuText {
+                                    id: desktopActionText
+
+                                    anchors.centerIn: parent
+
+                                    text: modelData.name || "ACTION"
+
+                                    font.pixelSize: 14
+
+                                    color: desktopActionButton.isPressed
+                                           ? Colors.black
+                                           : Colors.orange
+                                }
+
+                                DropShadow {
+                                    anchors.fill: desktopActionText
+                                    source: desktopActionText
+
+                                    horizontalOffset: 0
+                                    verticalOffset: 0
+
+                                    radius: 7
+                                    samples: 5
+
+                                    z: 2
+
+                                    opacity: desktopActionButton.isPressed
+                                             ? 0.0
+                                             : desktopActionButton.isHovered
+                                               || desktopActionButton.isSelected
+                                             ? 0.48
+                                             : 0.38
+
+                                    color: Colors.orange
+                                    transparentBorder: true
+                                }
+                            }
+                        }
+
+                        MouseArea {
+                            id: desktopActionMouse
+
+                            anchors.fill: parent
+                            hoverEnabled: true
+
+                            onEntered: {
+                                appControlWindow.keyboardActive = false;
+                                appControlWindow.selectedDetailActionIndex = index + 1;
+                            }
+
+                            onClicked: {
+                                appControlWindow.selectedDetailActionIndex = index + 1;
+                                appControlWindow.activateSelectedDetailAction();
+                            }
+                        }
+
+                        RectangularShadow {
+                            anchors.fill: parent
+
+                            spread: 5
+                            z: -1
+
+                            opacity: desktopActionButton.isHovered
+                                     || desktopActionButton.isSelected
+                                     ? 0.60
+                                     : 0.26
+
+                            color: Colors.orange
+                        }
+                    }
+                }
+            }
+
+            Column {
+                id: runActionSection
+
+                width: parent.width
+                spacing: 8
+
+                visible: appControlWindow.selectedResultIsRun()
+                         && appControlWindow.selectedResult() !== null
+
+                Item {
+                    id: runActionsHeaderGlowBox
+
+                    width: runActionsHeaderText.implicitWidth + 24
+                    height: runActionsHeaderText.implicitHeight + 16
+
+                    layer.enabled: true
+                    layer.effect: DropShadow {
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 7
+
+                        opacity: 0.38
+                        color: Colors.cyan
+
+                        transparentBorder: true
+                    }
+
+                    GohuText {
+                        id: runActionsHeaderText
+
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12
+
+                        text: "COMMAND ACTION"
+
+                        font.pixelSize: 13
+                        color: Colors.cyan
+                    }
+                }
+
+                Rectangle {
+                    id: runAction
+
+                    width: parent.width - 10
+                    height: 38
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+
+                    property bool isHovered:
+                        !appControlWindow.keyboardActive
+                        && runActionMouse.containsMouse
+                    property bool isPressed: runActionMouse.pressed
+                    property bool isSelected:
+                        appControlWindow.detailFocused
+                        && appControlWindow.selectedDetailActionIndex === 0
+
+                    color: isPressed
+                           ? Colors.magenta
+                           : isHovered || isSelected
+                           ? Colors.yellow
+                           : Colors.dark
+
+                    border.width: 1
+                    border.color: isHovered || isSelected
+                                  ? Colors.orange
+                                  : Colors.cyan
+
+                    GohuText {
+                        id: runActionText
+
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12
+
+                        text: "RUN COMMAND"
+
+                        font.pixelSize: 15
+
+                        color: runAction.isPressed
+                               ? Colors.black
+                               : runAction.isHovered || runAction.isSelected
+                               ? Colors.orange
+                               : Colors.cyan
+                    }
+
+                    DropShadow {
+                        anchors.fill: runActionText
+                        source: runActionText
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        z: 2
+
+                        opacity: runAction.isPressed
+                                 ? 0.0
+                                 : runAction.isHovered || runAction.isSelected
+                                 ? 0.48
+                                 : 0.38
+
+                        color: runAction.isHovered || runAction.isSelected
+                               ? Colors.orange
+                               : Colors.cyan
+
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: runActionMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                        onEntered: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.selectedDetailActionIndex = 0;
+                        }
+
+                        onClicked: {
+                            appControlWindow.selectedDetailActionIndex = 0;
+                            appControlWindow.activateSelectedDetailAction();
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 5
+                        z: -1
+
+                        opacity: runAction.isHovered || runAction.isSelected
+                                 ? 0.62
+                                 : 0.26
+
+                        color: runAction.isHovered || runAction.isSelected
+                               ? Colors.orange
+                               : Colors.cyan
+                    }
+                }
+
+                Item {
+                    id: runAlternateActionsHeaderGlowBox
+
+                    width: runAlternateActionsHeaderText.implicitWidth + 24
+                    height: runAlternateActionsHeaderText.implicitHeight + 16
+
+                    layer.enabled: true
+                    layer.effect: DropShadow {
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 5
+                        samples: 5
+
+                        opacity: 0.20
+                        color: Colors.orange
+
+                        transparentBorder: true
+                    }
+
+                    GohuText {
+                        id: runAlternateActionsHeaderText
+
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12
+
+                        text: "ALTERNATE ACTIONS"
+
+                        font.pixelSize: 13
+                        color: Colors.orange
+                        opacity: 0.75
+                    }
+                }
+
+                Rectangle {
+                    id: runKittyAction
+
+                    width: parent.width - 10
+                    height: 34
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+
+                    property bool isHovered:
+                        !appControlWindow.keyboardActive
+                        && runKittyActionMouse.containsMouse
+                    property bool isPressed: runKittyActionMouse.pressed
+                    property bool isSelected:
+                        appControlWindow.detailFocused
+                        && appControlWindow.selectedDetailActionIndex === 1
+
+                    // Match the alternate/desktop-action visual language.
+                    color: isPressed
+                           ? Colors.magenta
+                           : isHovered || isSelected
+                           ? Colors.yellow
+                           : Colors.black
+
+                    border.width: 1
+                    border.color: Colors.orange
+
+                    Row {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 10
+
+                        spacing: 8
+
+                        GohuText {
+                            id: runKittyActionIcon
+
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: "≽(^•⩊•^)≼"
+                            font.pixelSize: 14
+
+                            color: runKittyAction.isPressed
+                                   ? Colors.black
+                                   : Colors.orange
+                        }
+
+                        GohuText {
+                            id: runKittyActionText
+
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: "KITTY"
+
+                            font.pixelSize: 14
+                            color: runKittyAction.isPressed
+                                   ? Colors.black
+                                   : Colors.orange
+                        }
+                    }
+
+                    DropShadow {
+                        anchors.fill: runKittyActionText
+                        source: runKittyActionText
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        opacity: runKittyAction.isPressed
+                                 ? 0.0
+                                 : runKittyAction.isHovered
+                                   || runKittyAction.isSelected
+                                 ? 0.48
+                                 : 0.38
+
+                        color: Colors.orange
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: runKittyActionMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                        onEntered: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.selectedDetailActionIndex = 1;
+                        }
+
+                        onClicked: {
+                            appControlWindow.selectedDetailActionIndex = 1;
+                            appControlWindow.activateSelectedDetailAction();
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 5
+                        z: -1
+
+                        opacity: runKittyAction.isHovered
+                                 || runKittyAction.isSelected
+                                 ? 0.60
+                                 : 0.26
+
+                        color: Colors.orange
+                    }
+                }
+
+                Rectangle {
+                    id: runFloatAction
+
+                    width: parent.width - 10
+                    height: 34
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+
+                    property bool isHovered:
+                        !appControlWindow.keyboardActive
+                        && runFloatActionMouse.containsMouse
+                    property bool isPressed: runFloatActionMouse.pressed
+                    property bool isSelected:
+                        appControlWindow.detailFocused
+                        && appControlWindow.selectedDetailActionIndex === 2
+
+                    // Same alternate-action language as KITTY and desktop
+                    // actions: orange frame/text, yellow selected, magenta
+                    // pressed.
+                    color: isPressed
+                           ? Colors.magenta
+                           : isHovered || isSelected
+                           ? Colors.yellow
+                           : Colors.black
+
+                    border.width: 1
+                    border.color: Colors.orange
+
+                    Row {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 10
+
+                        spacing: 8
+
+                        GohuText {
+                            id: runFloatActionIcon
+
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: "⊹ ࣪ ˖🕊⋆₊⊹"
+                            font.pixelSize: 14
+
+                            color: runFloatAction.isPressed
+                                   ? Colors.black
+                                   : Colors.orange
+                        }
+
+                        GohuText {
+                            id: runFloatActionText
+
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: "FLOAT"
+
+                            font.pixelSize: 14
+                            color: runFloatAction.isPressed
+                                   ? Colors.black
+                                   : Colors.orange
+                        }
+                    }
+
+                    DropShadow {
+                        anchors.fill: runFloatActionText
+                        source: runFloatActionText
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        opacity: runFloatAction.isPressed
+                                 ? 0.0
+                                 : runFloatAction.isHovered
+                                   || runFloatAction.isSelected
+                                 ? 0.48
+                                 : 0.38
+
+                        color: Colors.orange
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: runFloatActionMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                        onEntered: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.selectedDetailActionIndex = 2;
+                        }
+
+                        onClicked: {
+                            appControlWindow.selectedDetailActionIndex = 2;
+                            appControlWindow.activateSelectedDetailAction();
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 5
+                        z: -1
+
+                        opacity: runFloatAction.isHovered
+                                 || runFloatAction.isSelected
+                                 ? 0.60
+                                 : 0.26
+
+                        color: Colors.orange
+                    }
+                }
+
+                Rectangle {
+                    id: runFullscreenAction
+
+                    width: parent.width - 10
+                    height: 34
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+
+                    property bool isHovered:
+                        !appControlWindow.keyboardActive
+                        && runFullscreenActionMouse.containsMouse
+                    property bool isPressed: runFullscreenActionMouse.pressed
+                    property bool isSelected:
+                        appControlWindow.detailFocused
+                        && appControlWindow.selectedDetailActionIndex === 3
+
+                    color: isPressed
+                           ? Colors.magenta
+                           : isHovered || isSelected
+                           ? Colors.yellow
+                           : Colors.black
+
+                    border.width: 1
+                    border.color: Colors.orange
+
+                    Row {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 10
+
+                        spacing: 8
+
+                        GohuText {
+                            id: runFullscreenActionIcon
+
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: "🂡🂱🃑🂭🂽"
+                            font.pixelSize: 16
+
+                            color: runFullscreenAction.isPressed
+                                   ? Colors.black
+                                   : Colors.orange
+                        }
+
+                        GohuText {
+                            id: runFullscreenActionText
+
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: "FULLSCREEN"
+
+                            font.pixelSize: 14
+                            color: runFullscreenAction.isPressed
+                                   ? Colors.black
+                                   : Colors.orange
+                        }
+                    }
+
+                    DropShadow {
+                        anchors.fill: runFullscreenActionText
+                        source: runFullscreenActionText
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        opacity: runFullscreenAction.isPressed
+                                 ? 0.0
+                                 : runFullscreenAction.isHovered
+                                   || runFullscreenAction.isSelected
+                                 ? 0.48
+                                 : 0.38
+
+                        color: Colors.orange
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: runFullscreenActionMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+
+                        onEntered: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.selectedDetailActionIndex = 3;
+                        }
+
+                        onClicked: {
+                            appControlWindow.selectedDetailActionIndex = 3;
+                            appControlWindow.activateSelectedDetailAction();
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 5
+                        z: -1
+
+                        opacity: runFullscreenAction.isHovered
+                                 || runFullscreenAction.isSelected
+                                 ? 0.60
+                                 : 0.26
+
+                        color: Colors.orange
+                    }
+                }
+
+                // Slight visual break between launch variants and
+                // destructive process control.
+                Item {
+                    width: 1
+                    height: 8
+                    visible: true
+                }
+
+                Item {
+                    id: runTerminationActionsHeaderGlowBox
+
+                    visible: true
+
+                    width: runTerminationActionsHeaderText.implicitWidth + 24
+                    height: runTerminationActionsHeaderText.implicitHeight + 16
+
+                    layer.enabled: visible
+                    layer.effect: DropShadow {
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 5
+                        samples: 5
+
+                        opacity: 0.24
+                        color: Colors.red
+
+                        transparentBorder: true
+                    }
+
+                    GohuText {
+                        id: runTerminationActionsHeaderText
+
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12
+
+                        text: "TERMINATION ACTIONS"
+
+                        font.pixelSize: 13
+                        color: Colors.red
+                        opacity: 0.82
+                    }
+                }
+
+                Rectangle {
+                    id: runKillAction
+
+                    visible: true
+
+                    width: parent.width - 10
+                    height: 34
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+
+                    property bool isHovered:
+                        visible
+                        && !appControlWindow.keyboardActive
+                        && runKillActionMouse.containsMouse
+                    property bool isPressed:
+                        visible && runKillActionMouse.pressed
+                    property bool isSelected:
+                        visible
+                        && appControlWindow.detailFocused
+                        && appControlWindow.selectedDetailActionIndex === 4
+
+                    color: isPressed
+                           ? Colors.magenta
+                           : isHovered || isSelected
+                           ? Colors.yellow
+                           : Colors.black
+
+                    opacity: appControlWindow.runKillAvailable ? 1.0 : 0.48
+
+                    border.width: 1
+                    border.color: Colors.red
+
+                    Row {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 10
+
+                        spacing: 8
+
+                        Row {
+                            id: runKillActionIcon
+
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 0
+
+                            GohuText {
+                                id: runKillActionFace
+
+                                anchors.verticalCenter: parent.verticalCenter
+
+                                text:
+                                    !appControlWindow.runKillAvailable
+                                    ? "(•_•)"
+                                    : runKillAction.isPressed
+                                    ? "(=ᗜ=)"
+                                    : runKillAction.isHovered
+                                    ? "ദ്ദി(-_•)"
+                                    : "(-_•)"
+
+                                font.pixelSize: 14
+
+                                color: runKillAction.isPressed
+                                       ? Colors.black
+                                       : Colors.red
+                            }
+
+                            GohuText {
+                                id: runKillActionGun
+
+                                anchors.verticalCenter: parent.verticalCenter
+
+                                // Keep the gun isolated from the changing face
+                                // so the combining marks shape identically in
+                                // idle, hover, and selected states.
+                                text: "デ╾━"
+
+                                font.pixelSize: 14
+
+                                color: runKillAction.isPressed
+                                       ? Colors.black
+                                       : Colors.red
+                            }
+
+                            GohuText {
+                                id: runKillActionSpray
+
+                                anchors.verticalCenter: parent.verticalCenter
+
+                                text: runKillAction.isPressed
+                                      ? " ๋࣭⭑"
+                                      : ""
+
+                                font.pixelSize: 14
+
+                                color: runKillAction.isPressed
+                                       ? Colors.black
+                                       : Colors.red
+                            }
+                        }
+
+                        GohuText {
+                            id: runKillActionText
+
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            text: appControlWindow.runKillAvailable
+                                  ? "KILL"
+                                  : "KILL  [NO TARGET]"
+
+                            font.pixelSize: 14
+                            color: runKillAction.isPressed
+                                   ? Colors.black
+                                   : Colors.red
+                        }
+                    }
+
+                    DropShadow {
+                        anchors.fill: runKillActionText
+                        source: runKillActionText
+
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 5
+
+                        opacity: runKillAction.isPressed
+                                 ? 0.0
+                                 : runKillAction.isHovered
+                                   || runKillAction.isSelected
+                                 ? 0.52
+                                 : 0.34
+
+                        color: Colors.red
+                        transparentBorder: true
+                    }
+
+                    MouseArea {
+                        id: runKillActionMouse
+
+                        anchors.fill: parent
+                        enabled: appControlWindow.runKillAvailable
+                        hoverEnabled: true
+
+                        onEntered: {
+                            appControlWindow.keyboardActive = false;
+                            appControlWindow.selectedDetailActionIndex = 4;
+                        }
+
+                        onClicked: {
+                            appControlWindow.selectedDetailActionIndex = 4;
+                            appControlWindow.activateSelectedDetailAction();
+                        }
+                    }
+
+                    RectangularShadow {
+                        anchors.fill: parent
+
+                        spread: 5
+                        z: -1
+
+                        opacity: runKillAction.isHovered
+                                 || runKillAction.isSelected
+                                 ? 0.62
+                                 : 0.22
+
+                        color: Colors.red
+                    }
+                }
+
+                GridLayout {
+                    width: parent.width
+
+                    columns: 3
+                    columnSpacing: 6
+                    rowSpacing: 4
+
+                    GohuText {
+                        id: runShellLabel
+
+                        Layout.preferredWidth: 76
+                        text: "SHELL"
+                        font.pixelSize: 13
+                        color: Colors.orange
+
+                        layer.enabled: true
+                        layer.effect: DropShadow {
+                            horizontalOffset: 0
+                            verticalOffset: 0
+                            radius: 5
+                            samples: 5
+                            opacity: 0.34
+                            color: runShellLabel.color
+                            transparentBorder: true
+                        }
+                    }
+
+                    GohuText {
+                        Layout.preferredWidth: 10
+                        text: ":"
+                        font.pixelSize: 13
+                        color: Colors.white
+                    }
+
+                    GohuText {
+                        id: runShellValue
+
+                        Layout.fillWidth: true
+                        text: appControlWindow.runShellName().toUpperCase()
+                        font.pixelSize: 13
+                        color: Colors.white
+                        elide: Text.ElideRight
+
+                        layer.enabled: true
+                        layer.effect: DropShadow {
+                            horizontalOffset: 0
+                            verticalOffset: 0
+                            radius: 5
+                            samples: 5
+                            opacity: 0.30
+                            color: runShellValue.color
+                            transparentBorder: true
+                        }
+                    }
+
+                    GohuText {
+                        id: runPrefixLabel
+
+                        Layout.preferredWidth: 76
+                        text: "PREFIX"
+                        font.pixelSize: 13
+                        color: Colors.orange
+
+                        layer.enabled: true
+                        layer.effect: DropShadow {
+                            horizontalOffset: 0
+                            verticalOffset: 0
+                            radius: 5
+                            samples: 5
+                            opacity: 0.34
+                            color: runPrefixLabel.color
+                            transparentBorder: true
+                        }
+                    }
+
+                    GohuText {
+                        Layout.preferredWidth: 10
+                        text: ":"
+                        font.pixelSize: 13
+                        color: Colors.white
+                    }
+
+                    GohuText {
+                        id: runPrefixValue
+
+                        Layout.fillWidth: true
+
+                        property var runEntry: appControlWindow.selectedResult()
+                        property var sourceEntry:
+                            appControlWindow.favoriteSourceItem(runEntry)
+
+                        text: appControlWindow.runPrefixName(
+                                  appControlWindow.runPrefixModeForEntry(
+                                      sourceEntry
+                                  )
+                              )
+
+                        font.pixelSize: 13
+                        color: text === "KITTY"
+                               ? Colors.magenta
+                               : Colors.cyan
+                        elide: Text.ElideRight
+
+                        layer.enabled: true
+                        layer.effect: DropShadow {
+                            horizontalOffset: 0
+                            verticalOffset: 0
+                            radius: 5
+                            samples: 5
+                            opacity: 0.34
+                            color: runPrefixValue.color
+                            transparentBorder: true
+                        }
+                    }
+
+                    GohuText {
+                        id: runListLabel
+
+                        Layout.preferredWidth: 76
+                        text: "LIST"
+                        font.pixelSize: 13
+                        color: Colors.orange
+
+                        layer.enabled: true
+                        layer.effect: DropShadow {
+                            horizontalOffset: 0
+                            verticalOffset: 0
+                            radius: 5
+                            samples: 5
+                            opacity: 0.34
+                            color: runListLabel.color
+                            transparentBorder: true
+                        }
+                    }
+
+                    GohuText {
+                        Layout.preferredWidth: 10
+                        text: ":"
+                        font.pixelSize: 13
+                        color: Colors.white
+                    }
+
+                    GohuText {
+                        id: runListValue
+
+                        Layout.fillWidth: true
+
+                        text: appControlWindow.runListMode
+                              === appControlWindow.runListAll
+                              ? "SYSTEM"
+                              : appControlWindow.runListMode
+                                === appControlWindow.runListTerminal
+                              ? "TERMINAL"
+                              : "USER"
+
+                        font.pixelSize: 13
+                        color: text === "SYSTEM"
+                               ? Colors.magenta
+                               : text === "TERMINAL"
+                               ? Colors.omnitrix
+                               : Colors.cyan
+                        elide: Text.ElideRight
+
+                        layer.enabled: true
+                        layer.effect: DropShadow {
+                            horizontalOffset: 0
+                            verticalOffset: 0
+                            radius: 5
+                            samples: 5
+                            opacity: 0.34
+                            color: runListValue.color
+                            transparentBorder: true
+                        }
+                    }
+
+                    GohuText {
+                        id: runSourceLabel
+
+                        Layout.preferredWidth: 76
+                        text: "SOURCE"
+                        font.pixelSize: 13
+                        color: Colors.orange
+
+                        layer.enabled: true
+                        layer.effect: DropShadow {
+                            horizontalOffset: 0
+                            verticalOffset: 0
+                            radius: 5
+                            samples: 5
+                            opacity: 0.34
+                            color: runSourceLabel.color
+                            transparentBorder: true
+                        }
+                    }
+
+                    GohuText {
+                        Layout.preferredWidth: 10
+                        text: ":"
+                        font.pixelSize: 13
+                        color: Colors.white
+                    }
+
+                    GohuText {
+                        id: runSourceValue
+
+                        Layout.fillWidth: true
+
+                        property var runEntry: appControlWindow.selectedResult()
+
+                        text: runEntry && runEntry._runOrigin
+                              ? String(runEntry._runOrigin)
+                              : appControlWindow.selectedModeIndex
+                                === appControlWindow.favoritesModeIndex
+                              ? "FAVORITE"
+                              : "COMMAND"
+
+                        font.pixelSize: 13
+                        color: Colors.magenta
+                        elide: Text.ElideRight
+
+                        layer.enabled: true
+                        layer.effect: DropShadow {
+                            horizontalOffset: 0
+                            verticalOffset: 0
+                            radius: 5
+                            samples: 5
+                            opacity: 0.34
+                            color: runSourceValue.color
+                            transparentBorder: true
+                        }
+                    }
+                }
+            }
+
+                Item {
+                    id: detailHintGlowBox
+
+                    visible: appControlWindow.selectedResultSupportsDetail()
+
+                    width: detailHintText.implicitWidth + 24
+                    height: detailHintText.implicitHeight + 16
+
+                    property color hintColor: appControlWindow.detailFocused
+                                              ? Colors.orange
+                                              : Colors.cyan
+
+                    layer.enabled: true
+                    layer.effect: DropShadow {
+                        horizontalOffset: 0
+                        verticalOffset: 0
+
+                        radius: 7
+                        samples: 7
+
+                        opacity: 0.38
+
+                        color: detailHintGlowBox.hintColor
+
+                        transparentBorder: true
+                    }
+
+                    GohuText {
+                        id: detailHintText
+
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 12
+
+                        text: appControlWindow.detailFocused
+                              ? "DETAIL MODE ACTIVE"
+                              : "RIGHT → DETAILS"
+
+                        font.pixelSize: 15
+
+                        color: detailHintGlowBox.hintColor
+                    }
+                }
+            }
+        }
+
+        // ========================================================
+        // APP CONTROL SCROLLBAR
+        // ========================================================
+
+        Rectangle {
+            id: detailScrollTrack
+
+            width: 10
+
+            anchors.top: detailStaticHeader.bottom
+            anchors.bottom: detailFlickable.bottom
+            anchors.right: parent.right
+
+            anchors.topMargin: -1
+            anchors.rightMargin: 7
+
+            color: Colors.cyan
+
+            opacity: detailFlickable.contentHeight > detailFlickable.height + 1
+                     ? 0.9
+                     : 0.0
+
+            visible: opacity > 0.0
+
+            z: 300
+
+            property real maxContentY: Math.max(
+                0,
+                detailFlickable.contentHeight - detailFlickable.height
+            )
+
+            property real handleTravel: Math.max(
+                0,
+                height - detailScrollHandle.height
+            )
+
+            function setScrollFromHandleY(handleY) {
+                if (maxContentY <= 0 || handleTravel <= 0)
+                    return;
+
+                const clampedY = Math.max(
+                    0,
+                    Math.min(handleTravel, handleY)
+                );
+
+                detailFlickable.contentY =
+                    (clampedY / handleTravel) * maxContentY;
+            }
+
+            Rectangle {
+                id: detailScrollHandle
+
+                width: 6
+                anchors.horizontalCenter: parent.horizontalCenter
+
+                height: Math.max(
+                    30,
+                    parent.height * Math.min(
+                        1.0,
+                        detailFlickable.visibleArea.heightRatio
+                    )
+                )
+
+                y: {
+                    if (detailScrollTrack.maxContentY <= 0
+                            || detailScrollTrack.handleTravel <= 0)
+                        return 0;
+
+                    const clampedContentY = Math.max(
+                        0,
+                        Math.min(
+                            detailScrollTrack.maxContentY,
+                            detailFlickable.contentY
+                        )
+                    );
+
+                    return (clampedContentY / detailScrollTrack.maxContentY)
+                            * detailScrollTrack.handleTravel;
+                }
+
+                color: Colors.magenta
+
+                RectangularShadow {
+                    anchors.fill: parent
+
+                    spread: 2
+                    z: -1
+
+                    opacity: 0.16
+                    color: Colors.magenta
+                }
+            }
+
+            MouseArea {
+                id: detailScrollMouse
+
+                anchors.fill: parent
+
+                hoverEnabled: true
+                acceptedButtons: Qt.LeftButton
+
+                property real dragOffset: 0
+
+                onPressed: function(mouse) {
+                    const handleTop = detailScrollHandle.y;
+                    const handleBottom =
+                        detailScrollHandle.y + detailScrollHandle.height;
+
+                    if (mouse.y >= handleTop && mouse.y <= handleBottom) {
+                        dragOffset = mouse.y - detailScrollHandle.y;
+                    } else {
+                        dragOffset = detailScrollHandle.height / 2;
+
+                        detailScrollTrack.setScrollFromHandleY(
+                            mouse.y - dragOffset
+                        );
+                    }
+
+                    mouse.accepted = true;
+                }
+
+                onPositionChanged: function(mouse) {
+                    if (!pressed)
+                        return;
+
+                    detailScrollTrack.setScrollFromHandleY(
+                        mouse.y - dragOffset
+                    );
+                }
+
+                onWheel: function(wheel) {
+                    // Keep wheel/trackpad scrolling available to the Flickable.
+                    wheel.accepted = false;
+                }            }
+        }
+
+        Rectangle {
+            id: detailBottomBar
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+
+            anchors.leftMargin: 5
+            anchors.rightMargin: 5
+            anchors.bottomMargin: 10
+
+            height: 2
+
+            color: Colors.cyan
+
+            RectangularShadow {
+                anchors.fill: parent
+                spread: 3
+                z: -1
+                opacity: 0.38
+                color: Colors.cyan
+            }
+        }
+    }
+
+    // ============================================================
+    // APP SELECTOR / CONTROL PANE DIVIDER
+    // ============================================================
+
+    Rectangle {
+        id: resultsDetailDivider
+
+        width: 1
+
+        anchors.left: detailPane.left
+        anchors.top: background.top
+        anchors.bottom: background.bottom
+
+        color: appControlWindow.detailFocused
+               && appControlWindow.selectedResultSupportsDetail()
+               ? Colors.magenta
+               : Colors.orange
+
+        z: 1002
+
+        RectangularShadow {
+            anchors.fill: parent
+            spread: 3
+            z: -1
+            opacity: 0.38
+            color: resultsDetailDivider.color
+        }
+    }
+
+    // ============================================================
+    // MODE / APP SELECTOR DIVIDER
+    // ============================================================
+
+    Rectangle {
+        id: modeResultsDivider
+
+        width: 1
+
+        anchors.left: resultsPane.left
+        anchors.top: background.top
+        anchors.bottom: background.bottom
+
+        color: Colors.orange
+
+        z: 1001
+
+        RectangularShadow {
+            anchors.fill: parent
+            spread: 3
+            z: -1
+            opacity: 0.38
+            color: Colors.orange
+        }
+    }
+
+    // ============================================================
+    // OUTER BORDER
+    // ============================================================
+
+    Rectangle {
+        id: appControlBorder
+
+        anchors.fill: background
+
+        color: "transparent"
+
+        border.width: 1
+        border.color: Colors.orange
+
+        z: 1000
+    }
+
+    // ============================================================
+    // KEYBOARD
+    // ============================================================
+
+    function handleKey(event) {
+        keyboardActive = true;
+
+        if (event.key === Qt.Key_Escape) {
+            if (detailFocused) {
+                detailFocused = false;
+                resetDetailActionSelection();
+                searchInput.forceActiveFocus();
+            } else {
+                menuOpen = false;
+            }
+
+            event.accepted = true;
+            return;
+        }
+
+        // Tab is contextual:
+        //
+        // APP SELECTOR:
+        //   Tab       -> next mode
+        //   Shift+Tab -> previous mode
+        //
+        // APPS CONTROL PANE:
+        //   Tab       -> next application
+        //   Shift+Tab -> previous application
+        //
+        // This lets you inspect/control neighboring apps without first
+        // pressing Left to return to the selector.
+        if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+            const backwards = event.key === Qt.Key_Backtab
+                              || (event.modifiers & Qt.ShiftModifier);
+
+            if (detailFocused && selectedResultSupportsDetail()) {
+                moveResultSelection(backwards ? -1 : 1);
+                resetDetailActionSelection();
+
+                // moveResultSelection() intentionally marks keyboard control
+                // as active; stay in the right-hand control pane.
+                detailFocused = true;
+
+                event.accepted = true;
+                return;
+            }
+
+            let newModeIndex = selectedModeIndex;
+
+            if (backwards) {
+                newModeIndex--;
+
+                if (newModeIndex < 0)
+                    newModeIndex = modes.length - 1;
+            } else {
+                newModeIndex++;
+
+                if (newModeIndex >= modes.length)
+                    newModeIndex = 0;
+            }
+
+            switchMode(newModeIndex, true);
+
+            event.accepted = true;
+            return;
+        }
+
+        if (event.key === Qt.Key_Up) {
+            if (detailFocused) {
+                const count = detailActionCount();
+
+                if (count === 0) {
+                    event.accepted = true;
+                    return;
+                }
+
+                selectedDetailActionIndex--;
+
+                if (selectedDetailActionIndex < 0)
+                    selectedDetailActionIndex = count - 1;
+
+                ensureDetailActionVisible();
+
+                event.accepted = true;
+                return;
+            }
+
+            moveResultSelection(-1);
+
+            event.accepted = true;
+            return;
+        }
+
+        if (event.key === Qt.Key_Down) {
+            if (detailFocused) {
+                const count = detailActionCount();
+
+                if (count === 0) {
+                    event.accepted = true;
+                    return;
+                }
+
+                selectedDetailActionIndex++;
+
+                if (selectedDetailActionIndex >= count)
+                    selectedDetailActionIndex = 0;
+
+                ensureDetailActionVisible();
+
+                event.accepted = true;
+                return;
+            }
+
+            moveResultSelection(1);
+
+            event.accepted = true;
+            return;
+        }
+
+        if (event.key === Qt.Key_Right) {
+            if (!detailFocused && selectedResultSupportsDetail()) {
+                detailFocused = true;
+                resetDetailActionSelection();
+            }
+
+            event.accepted = true;
+            return;
+        }
+
+        // RUN quick selectors:
+        //
+        //   Shift+Left -> USER -> TERMINAL -> SYSTEM -> USER
+        //   Ctrl+Left  -> NORMAL <-> KITTY
+        if (selectedModeIndex === runModeIndex
+                && event.key === Qt.Key_Left
+                && (event.modifiers & Qt.ShiftModifier)) {
+            if (runListMode === runListUser)
+                setRunListMode(runListTerminal);
+            else if (runListMode === runListTerminal)
+                setRunListMode(runListAll);
+            else
+                setRunListMode(runListUser);
+
+            event.accepted = true;
+            return;
+        }
+
+        if (selectedModeIndex === runModeIndex
+                && event.key === Qt.Key_Left
+                && (event.modifiers & Qt.ControlModifier)) {
+            setRunPrefixMode(
+                runPrefixMode === runPrefixNormal
+                ? runPrefixKitty
+                : runPrefixNormal
+            );
+
+            event.accepted = true;
+            return;
+        }
+
+        if (event.key === Qt.Key_Left) {
+            if (detailFocused) {
+                detailFocused = false;
+                resetDetailActionSelection();
+                searchInput.forceActiveFocus();
+            }
+
+            event.accepted = true;
+            return;
+        }
+
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            if (detailFocused)
+                activateSelectedDetailAction();
+            else
+                activateSelectedResult();
+
+            event.accepted = true;
+            return;
+        }
+    }
+
+    // ============================================================
+    // MODE-SPECIFIC RESULT ACTIVATION
+    // ============================================================
+
+    function activateSelectedResult() {
+        activateResult(selectedResult(), selectedModeIndex);
+    }
+
+    // ============================================================
+    // OPEN / FOCUS
+    // ============================================================
+
+    onMenuOpenChanged: {
+        if (menuOpen) {
+            appControlWindow.favoritesFaceClickPulse = false;
+            appControlWindow.favoritesFaceBlinking = false;
+            appControlWindow.favoritesFaceDoubleBlinkPending = false;
+
+            appControlWindow.kittyFaceClickPulse = false;
+            appControlWindow.kittyFaceBlinking = false;
+            appControlWindow.kittyFaceDoubleBlinkPending = false;
+
+            appControlWindow.scheduleFavoritesFaceBlink();
+            appControlWindow.scheduleKittyFaceBlink();
+
+            // FAVORITES stays first in the rail, but opening the menu
+            // always starts interaction on APPS. Preserve each mode's input
+            // independently so an APPS search never becomes a RUN command.
+            saveInputForMode(selectedModeIndex);
+            selectedModeIndex = appsModeIndex;
+            restoreInputForMode(selectedModeIndex);
+
+            detailFocused = false;
+            keyboardActive = false;
+            hoveredResultIndex = -1;
+            resetResultSelection();
+            rememberCurrentAppSelection();
+            resetDetailActionSelection();
+            scheduleRunKillProbe();
+
+            refreshWindowState();
+            searchInput.forceActiveFocus();
+        } else {
+            favoritesFaceBlinkTimer.stop();
+            favoritesFaceBlinkEndTimer.stop();
+            favoritesFaceSecondBlinkGapTimer.stop();
+            favoritesFaceSecondBlinkEndTimer.stop();
+            favoritesFaceClickPulseTimer.stop();
+
+            kittyFaceBlinkTimer.stop();
+            kittyFaceBlinkEndTimer.stop();
+            kittyFaceSecondBlinkGapTimer.stop();
+            kittyFaceSecondBlinkEndTimer.stop();
+            kittyFaceClickPulseTimer.stop();
+            runKillProbeTimer.stop();
+            runKillRefreshTimer.stop();
+
+            appControlWindow.runKillAvailable = false;
+            appControlWindow.runKillProbeTarget = "";
+            appControlWindow.runKillResolvedTarget = "";
+            appControlWindow.runKillPids = [];
+
+            appControlWindow.favoritesFaceClickPulse = false;
+            appControlWindow.favoritesFaceBlinking = false;
+            appControlWindow.favoritesFaceDoubleBlinkPending = false;
+
+            appControlWindow.kittyFaceClickPulse = false;
+            appControlWindow.kittyFaceBlinking = false;
+            appControlWindow.kittyFaceDoubleBlinkPending = false;
+        }
+    }
+}
+

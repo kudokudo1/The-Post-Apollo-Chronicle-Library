@@ -1,0 +1,65 @@
+# ============================================================
+# METAPOLLO — ALPHA-ONLY STATE DEBUG
+#
+# RGB is NOT used for state anymore.
+# The entire state machine lives in alpha, which avoids RGB
+# color-space conversion changing our mode/progress values.
+#
+# Expected:
+#   ACTIVE    = CYAN
+#   SLEEP     = RED -> ORANGE
+#   NO SIGNAL = BLUE
+#   WAKE      = MAGENTA -> PINK
+# ============================================================
+
+textures a persist
+
+# IDLE: ACTIVE -> SLEEP -> NO SIGNAL
+startgroup
+    animation_start user-idle
+    animation_stop 1100
+    animation_curve linear
+    animation_step 16
+
+    output_texture a
+
+    var int EVENT_KIND = 1
+    var float TRANSITION_STEP = 0.018
+
+    shaders metapollo-alpha-state
+endgroup
+
+startgroup
+    attach
+    animation_step 16
+    output_texture persist
+    shaders metapollo-alpha-copy
+endgroup
+
+# ACTIVITY: NO SIGNAL/SLEEP -> WAKE -> ACTIVE
+startgroup
+    animation_start os-window-focus-in | user-activity
+    animation_stop 1100
+    animation_curve linear
+    animation_step 16
+
+    output_texture a
+
+    var int EVENT_KIND = 2
+    var float TRANSITION_STEP = 0.018
+
+    shaders metapollo-alpha-state
+endgroup
+
+startgroup
+    attach
+    animation_step 16
+    output_texture persist
+    shaders metapollo-alpha-copy
+endgroup
+
+# Always display decoded alpha state.
+startgroup
+    animation_step 16
+    shaders metapollo-alpha-debug-show
+endgroup

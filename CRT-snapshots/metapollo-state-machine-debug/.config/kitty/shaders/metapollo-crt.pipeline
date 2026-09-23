@@ -1,0 +1,67 @@
+# ============================================================
+# METAPOLLO — STATE MACHINE ONLY DEBUG
+#
+# This uses the EXACT state writer from the full build.
+# No CRT effects. No NO SIGNAL renderer. No tear renderer.
+#
+# Expected:
+#   ACTIVE    = CYAN
+#   SLEEP     = RED -> ORANGE as progress advances
+#   NO SIGNAL = BLUE
+#   WAKE      = MAGENTA -> PINK as progress advances
+#   INVALID   = WHITE
+# ============================================================
+
+textures a persist
+
+# IDLE state writer -> A
+startgroup
+    animation_start user-idle
+    animation_stop 1100
+    animation_curve linear
+    animation_step 16
+
+    output_texture a
+
+    var int EVENT_KIND = 1
+    var float TRANSITION_STEP = 0.018
+
+    shaders metapollo-signal-event-state
+endgroup
+
+# Commit A -> persist
+startgroup
+    attach
+    animation_step 16
+    output_texture persist
+    shaders metapollo-signal-copy-a
+endgroup
+
+# ACTIVITY / FOCUS state writer -> A
+startgroup
+    animation_start os-window-focus-in | user-activity
+    animation_stop 1100
+    animation_curve linear
+    animation_step 16
+
+    output_texture a
+
+    var int EVENT_KIND = 2
+    var float TRANSITION_STEP = 0.018
+
+    shaders metapollo-signal-event-state
+endgroup
+
+# Commit A -> persist
+startgroup
+    attach
+    animation_step 16
+    output_texture persist
+    shaders metapollo-signal-copy-a
+endgroup
+
+# Always show decoded persist state
+startgroup
+    animation_step 16
+    shaders metapollo-state-debug-show
+endgroup

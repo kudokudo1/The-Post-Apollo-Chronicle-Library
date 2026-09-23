@@ -1,0 +1,67 @@
+# ============================================================
+# METAPOLLO — ATTACHED A -> PERSIST HANDOFF TEST
+#
+# Purpose:
+#   Prove or disprove ONLY this path:
+#
+#     Kitty event -> scratch A -> attached copy -> persist -> screen
+#
+# Expected:
+#   startup/focus = CYAN
+#   idle (~15s)   = GREEN and STAYS GREEN
+#   activity      = YELLOW and STAYS YELLOW
+#
+# No CRT effects. No state machine. No transition math.
+# ============================================================
+
+textures a persist
+
+# Startup marker directly into persist so we know persist/display works.
+startgroup
+    animation_start os-window-focus-in
+    animation_stop 300
+    animation_step 16
+    output_texture persist
+    var int EVENT_KIND = 0
+    shaders metapollo-handoff-event
+endgroup
+
+# IDLE: event -> A
+startgroup
+    animation_start user-idle
+    animation_stop 300
+    animation_step 16
+    output_texture a
+    var int EVENT_KIND = 1
+    shaders metapollo-handoff-event
+endgroup
+
+# Immediately copy A -> persist in the SAME active chain.
+startgroup
+    attach
+    output_texture persist
+    shaders metapollo-handoff-copy
+endgroup
+
+# ACTIVITY: event -> A
+startgroup
+    animation_start user-activity
+    animation_stop 300
+    animation_step 16
+    output_texture a
+    var int EVENT_KIND = 2
+    shaders metapollo-handoff-event
+endgroup
+
+# Immediately copy A -> persist in the SAME active chain.
+startgroup
+    attach
+    output_texture persist
+    shaders metapollo-handoff-copy
+endgroup
+
+# Always display persist.
+startgroup
+    animation_step 0
+    shaders metapollo-handoff-show
+endgroup

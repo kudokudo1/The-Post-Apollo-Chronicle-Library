@@ -1,0 +1,46 @@
+# ============================================================
+# METAPOLLO — DIRECT EVENT -> PERSIST DIAGNOSTIC
+#
+# No scratch textures. No controller. No old visual stack.
+# This tests only whether an event-driven group can write persist
+# and whether a later group can read it on subsequent frames.
+# ============================================================
+
+textures persist
+
+# Startup marker: CYAN
+startgroup
+    animation_start os-window-focus-in
+    animation_stop 500
+    animation_step 16
+    output_texture persist
+    var int EVENT_KIND = 0
+    shaders metapollo-persist-event
+endgroup
+
+# Idle marker: GREEN
+startgroup
+    animation_start user-idle
+    animation_stop 500
+    animation_step 16
+    output_texture persist
+    var int EVENT_KIND = 1
+    shaders metapollo-persist-event
+endgroup
+
+# Activity marker: YELLOW
+startgroup
+    animation_start user-activity
+    animation_stop 500
+    animation_step 16
+    output_texture persist
+    var int EVENT_KIND = 2
+    shaders metapollo-persist-event
+endgroup
+
+# Always show exactly what persist currently contains.
+# This final group must render to the default framebuffer.
+startgroup
+    animation_step 0
+    shaders metapollo-persist-show
+endgroup
