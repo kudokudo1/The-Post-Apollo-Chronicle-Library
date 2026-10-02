@@ -1,4 +1,26 @@
-# Post-Apollo Pre-Git Development History
+✦︎✦︎✦︎ Meta Apollo Logos //
+
+# ࣪⋅˚🕮‧₊˚ POST-APOLLO // HISTORY
+
+![](BUILD/assets/design/chassis/focus-rail.svg)
+
+> **STATE //** preserved \~\~ **VIEW //** pre-Git development archive
+
+> **This repository preserves pre-Git Post-Apollo development material as human-browsable provenance rather than current implementation.**
+
+### 🧭 MAP // REPOSITORY
+
+![](BUILD/assets/design/chassis/nav-rail.svg)
+
+// [🧭 ATLAS](./ATLAS/) \~\~ // [✮˙๋࣭⭑ MODEL](./MODEL/) \~\~ // [🖨 BUILD](./BUILD/) \~\~ // [⚒ DEV](./DEV/) \~\~ // [🖳 OPERATE](./OPERATE/) \~\~ // [⊹ ࣪ℼ˖ EVIDENCE](./EVIDENCE/) \~\~ // [࣪⋅˚🕮‧₊˚ ARCHIVE](./ARCHIVE/)
+
+---
+
+### ★⋆˙ CORE // ARCHIVE RULE
+
+Historical material stays where it was preserved. The seven-room layer explains the archive; it does not reinterpret old files as current implementation.
+
+---
 
 This repository preserves development material created before the
 Post-Apollo / Metapollo projects were moved to normal Git-based development.
