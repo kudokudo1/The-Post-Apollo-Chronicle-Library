@@ -4,9 +4,13 @@
 
 ![](BUILD/assets/design/chassis/focus-rail.svg)
 
+![Post-Apollo // Chronicle Library](./BUILD/assets/design/chronicle-library-banner.svg)
+
 > **STATE //** preserved \~\~ **VIEW //** pre-Git development archive
 
-> **This repository preserves pre-Git Post-Apollo development material as human-browsable provenance rather than current implementation.**
+The historical preservation layer of the Post-Apollo Family — preserving the relationship between projects, artifacts, evidence, history, and continuity, turning pre-Git development material into searchable provenance so earlier states, experiments, decisions, and transformations remain available without being mistaken for current implementation.
+
+**FAMILY //** [META APOLLO LOGOS](https://github.com/kudokudo1/Meta-Apollo-Logos) · [DEV EXP](https://github.com/kudokudo1/The-Post-Apollo-Dev-Exp) · [FOREST](https://github.com/kudokudo1/The-Post-Apollo-Forest-Project) · [TASKBARS](https://github.com/kudokudo1/taskbars-post-apollo)
 
 ### 🧭 MAP // REPOSITORY
 
