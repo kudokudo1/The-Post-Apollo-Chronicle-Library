@@ -1,6 +1,6 @@
 ✦︎✦︎✦︎ Meta Apollo Logos //
 
-# ࣪⋅˚🕮‧₊˚ POST-APOLLO // HISTORY
+# ࣪⋅˚🕮‧₊˚ POST-APOLLO // CHRONICLE LIBRARY
 
 ![](BUILD/assets/design/chassis/focus-rail.svg)
 
