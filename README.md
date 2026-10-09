@@ -10,7 +10,7 @@
 
 The historical preservation layer of the Post-Apollo Family — preserving the relationship between projects, artifacts, evidence, history, and continuity, turning pre-Git development material into searchable provenance so earlier states, experiments, decisions, and transformations remain available without being mistaken for current implementation.
 
-**FAMILY //** [META APOLLO LOGOS](https://github.com/kudokudo1/Meta-Apollo-Logos) · [DEV EXP](https://github.com/kudokudo1/The-Post-Apollo-Dev-Exp) · [FOREST](https://github.com/kudokudo1/The-Post-Apollo-Forest-Project) · [TASKBARS](https://github.com/kudokudo1/taskbars-post-apollo)
+**FAMILY //** [META APOLLO LOGOS](https://github.com/kudokudo1/Meta-Apollo-Logos) · [DEV EXP](https://github.com/kudokudo1/The-Post-Apollo-Dev-Exp) · [FOREST](https://github.com/kudokudo1/The-Post-Apollo-Forest-Project) · [POST-APOLLO PROJECT](https://github.com/kudokudo1/The-Post-Apollo-Project)
 
 ### 🧭 MAP // REPOSITORY
 
@@ -38,9 +38,9 @@ or intended to replace the authoritative project repositories.
 
 Current development lives in repositories such as:
 
-- taskbars-post-apollo
-- metapollo-kitty-crt
-- animate-swayfx
+- The-Post-Apollo-Project
+- Post-Apollo-Pretty-Kitty
+- Post-Apollo-SwayPx
 - other Post-Apollo repositories as they are migrated
 
 ## Contents
